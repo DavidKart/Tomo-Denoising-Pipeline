@@ -25,10 +25,10 @@ def first_tilt_average(config, series):
     MotionCor3 failed on it). Half images (_EVN/_ODD) are never considered.
     """
     motioncor_dir = os.path.join(config.rec_dir(series.name), "motioncor")
-    gain = str(config["acquisition"]["gain"] or "").strip()
+    gain_name = config.gain_name
 
     for frame in series.frames:
-        if gain and frame == gain:
+        if gain_name and os.path.basename(frame) == gain_name:
             continue
         stem = os.path.splitext(frame)[0]
         candidate = os.path.join(motioncor_dir, stem + "_averaged.mrc")

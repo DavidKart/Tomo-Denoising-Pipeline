@@ -107,16 +107,23 @@ one shared directory:
     motioncor/                *_averaged.mrc (+ _EVN/_ODD when splitting frames)
     stacks/                   full and half tilt series stacks, .aln
     aretomo_full/             TS_01_rec_tomo.mrc  (the full-dose tomogram)
-    aretomo_even/
-    aretomo_odd/
+    aretomo_even/             even_TS_01_rec_tomo.mrc + _projXY/_projXZ
+    aretomo_odd/              odd_TS_01_rec_tomo.mrc  + _projXY/_projXZ
     logs/                     one log per program call
   rec_TS_02/
     ...
-  raw_halfMaps/
+  raw_halfMaps/               symlinks - exactly two entries per tomogram
     even_TS_01_rec_tomo.mrc
     odd_TS_01_rec_tomo.mrc
     ...
 ```
+
+AreTomo2 derives its side products (`_projXY.mrc`, `_projXZ.mrc`) from the
+`-OutMrc` path rather than the working directory, so the half maps are
+reconstructed inside `rec_<tomo>/` and only the volume itself is symlinked into
+`raw_halfMaps/`. That keeps `raw_halfMaps/` to exactly the two half maps per
+tomogram, with nothing moved or deleted. Downstream steps open them through the
+link, so cryoCARE and IsoNet see them as ordinary files.
 
 Already-finished tilt series are skipped; pass `--force` to redo them.
 

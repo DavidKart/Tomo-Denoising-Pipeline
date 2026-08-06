@@ -106,8 +106,10 @@ acquisition:
   # Extension of the raw frames: tif, tiff, mrc or eer.
   frame_extension: "tiff"
 
-  # Gain reference file name inside paths.input_frames. Must be .mrc
+  # Gain reference. Must be .mrc
   # (convert a .dm4 with:  dm2mrc input_ref.dm4 output_ref.mrc).
+  # May be an absolute path, a path relative to where you run tomo_denoising,
+  # or a bare file name sitting in paths.input_frames - whichever exists.
   # Leave empty if the frames are already gain corrected.
   gain: ""
 
@@ -134,8 +136,11 @@ motioncor:
   tolerance: 0.5
 
   # Only used when acquisition.frame_extension is "eer".
+  # fm_int_file is resolved like the gain reference (absolute, relative to the
+  # working directory, or a bare name inside input_frames). Leave it empty to
+  # omit -FmIntFile entirely.
   eer_sampling: 1
-  fm_int_file: "fmintFile"
+  fm_int_file: ""
 
   # Appended verbatim to every MotionCor3 call.
   extra_args: ""

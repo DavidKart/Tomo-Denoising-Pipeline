@@ -20,6 +20,7 @@ from .utils import (
     banner,
     ensure_dir,
     info,
+    link_file,
     require_executable,
     run,
     warn,
@@ -44,6 +45,35 @@ class TomoDirs(object):
 # --------------------------------------------------------------- MotionCor3
 
 
+def resolve_input_file(config, value, key):
+    """Resolve an auxiliary input file the same way as the gain reference.
+
+    Accepts an absolute path, a path relative to the working directory, or a
+    bare file name sitting in input_frames - whichever exists. Returns "" when
+    nothing is configured, and raises when a value is set but not found.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    candidates = ([raw] if os.path.isabs(raw)
+                  else [os.path.abspath(raw),
+                        os.path.join(config.input_frames, raw)])
+    seen = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.append(candidate)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+
+    raise SystemExit(
+        "ERROR: %s %r not found. Looked in:\n  %s\n"
+        "Set it to an absolute path, or leave it empty to omit the option."
+        % (key, raw, "\n  ".join(seen))
+    )
+
+
 def _motioncor_input_flag(extension):
     if extension == "eer":
         return "-InEer"
@@ -62,11 +92,12 @@ def run_motioncor(config, series, dirs, dry_run=False):
     acquisition = config["acquisition"]
     mc = config["motioncor"]
     extension = acquisition["frame_extension"]
-    gain = str(acquisition["gain"] or "").strip()
+    gain = config.resolve_gain()
+    gain_name = config.gain_name
 
     produced = []
     for frame in series.frames:
-        if gain and frame == gain:
+        if gain_name and os.path.basename(frame) == gain_name:
             continue
         if "_averaged" in frame:
             continue
@@ -90,15 +121,14 @@ def run_motioncor(config, series, dirs, dry_run=False):
             "-OutMrc", output,
         ]
         if gain:
-            command += ["-Gain", os.path.join(config.input_frames, gain)]
+            command += ["-Gain", gain]
         if int(mc["flip_gain"]):
             command += ["-FlipGain", str(int(mc["flip_gain"]))]
         if extension == "eer":
             command += ["-EerSampling", str(mc["eer_sampling"])]
-            fm_int = str(mc["fm_int_file"] or "").strip()
+            fm_int = resolve_input_file(config, mc["fm_int_file"],
+                                        "motioncor.fm_int_file")
             if fm_int:
-                if not os.path.isabs(fm_int):
-                    fm_int = os.path.join(config.input_frames, fm_int)
                 command += ["-FmIntFile", fm_int]
         binning = int(mc["binning"])
         if binning not in (0, 1):
@@ -384,19 +414,30 @@ def process_series(config, series, force=False, dry_run=False):
                      for name in ordered],
                     odd_stack, dry_run=dry_run)
 
-    # 6. half reconstructions, straight into raw_halfMaps --------------------
-    reconstruct_half(config, dirs, even_stack, even_aln, even_map,
+    # 6. half reconstructions ------------------------------------------------
+    # AreTomo2 derives its side products (_projXY.mrc, _projXZ.mrc) from
+    # -OutMrc, not from the working directory, so the reconstruction is written
+    # inside rec_<tomo> and only the half map itself is linked into
+    # raw_halfMaps. That keeps raw_halfMaps to exactly two files per tomogram
+    # without moving or deleting anything.
+    even_out = os.path.join(dirs.aretomo_even, "even_%s_rec_tomo.mrc" % tomo_name)
+    odd_out = os.path.join(dirs.aretomo_odd, "odd_%s_rec_tomo.mrc" % tomo_name)
+
+    reconstruct_half(config, dirs, even_stack, even_aln, even_out,
                      tomo_name + "_aretomo_even.log", apix_binned,
                      dirs.aretomo_even, dry_run=dry_run)
-    reconstruct_half(config, dirs, odd_stack, odd_aln, odd_map,
+    reconstruct_half(config, dirs, odd_stack, odd_aln, odd_out,
                      tomo_name + "_aretomo_odd.log", apix_binned,
                      dirs.aretomo_odd, dry_run=dry_run)
 
     if not dry_run:
-        for path in (even_map, odd_map):
-            if not os.path.exists(path):
-                warn("expected half map was not produced: %s" % path)
+        for source, target in ((even_out, even_map), (odd_out, odd_map)):
+            if not os.path.exists(source):
+                warn("expected half map was not produced: %s" % source)
                 return False
+            link_file(source, target)
+        info("linked into %s" % config.raw_halfmaps_dir)
+
     info("done: %s" % dirs.root)
     return True
 
@@ -413,6 +454,12 @@ def create_half_maps(config, force=False, dry_run=False):
 
     ensure_dir(config.processing_dir)
     ensure_dir(config.raw_halfmaps_dir)
+
+    # Resolve up front: a missing gain would otherwise surface as a MotionCor3
+    # failure on every single tilt.
+    gain = config.resolve_gain()
+    if gain:
+        info("gain reference: %s" % gain)
 
     directory = config.mdoc_dir("preprocessing")
     all_series = collect_tilt_series(directory, "preprocessing")

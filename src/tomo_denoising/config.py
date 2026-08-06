@@ -51,7 +51,7 @@ DEFAULTS = {
         "iterations": 7,
         "tolerance": 0.5,
         "eer_sampling": 1,
-        "fm_int_file": "fmintFile",
+        "fm_int_file": "",
         "extra_args": "",
     },
     "aretomo": {
@@ -236,6 +236,46 @@ class Config(object):
 
     def exe(self, name):
         return self.data["executables"][name]
+
+    @property
+    def gain_name(self):
+        """Bare file name of the gain reference, for excluding it from frames."""
+        return os.path.basename(
+            str(self.data["acquisition"].get("gain") or "").strip()
+        )
+
+    def resolve_gain(self):
+        """Absolute path of the gain reference, or "" when none is configured.
+
+        Accepts an absolute path, a path relative to the working directory, or
+        a bare file name sitting in input_frames - whichever exists. Raises if
+        one is configured but cannot be found, since MotionCor3 would
+        otherwise fail once per tilt with a less obvious message.
+        """
+        raw = str(self.data["acquisition"].get("gain") or "").strip()
+        if not raw:
+            return ""
+
+        candidates = []
+        if os.path.isabs(raw):
+            candidates.append(raw)
+        else:
+            candidates.append(os.path.abspath(raw))
+            candidates.append(os.path.join(self.input_frames, raw))
+
+        seen = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.append(candidate)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+
+        raise SystemExit(
+            "ERROR: gain reference %r not found. Looked in:\n  %s\n"
+            "Set acquisition.gain to an absolute path, or leave it empty if "
+            "the frames are already gain corrected." % (raw, "\n  ".join(seen))
+        )
 
     # ----------------------------------------------------------- directories
     def sub(self, *parts):
