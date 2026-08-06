@@ -1,0 +1,268 @@
+# =============================================================================
+#  tomo_denoising configuration
+# =============================================================================
+#  Edit this file, then run the pipeline steps in order:
+#
+#    tomo_denoising create_halfMaps      # frames -> tomograms + even/odd half maps
+#    tomo_denoising train_cryoCARE       # cryoCARE training   (mdocs.train set)
+#    tomo_denoising predict_cryoCARE     # cryoCARE denoising  (mdocs.predict set)
+#    tomo_denoising train_isonet         # IsoNet training     (mdocs.train set)
+#    tomo_denoising predict_isonet       # IsoNet denoising    (mdocs.predict set)
+#
+#  Every step reads this file. Pass a different one with  -c / --config.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Paths
+# -----------------------------------------------------------------------------
+paths:
+
+  # Directory holding the RAW movie frames (.tif / .tiff / .mrc / .eer) and the
+  # gain reference. This directory is only ever READ FROM - nothing is written
+  # here. The file names are taken from the SubFramePath entries of the mdocs.
+  input_frames: "/path/to/raw/frames"
+
+  # Directory where ALL processing happens and all results are written.
+  # Created if it does not exist. Everything below is relative to it:
+  #
+  #   <processing_directory>/
+  #     mdocs/            <- mdocs.preprocessing / mdocs.predict (see below)
+  #     mdocsTrain/       <- mdocs.train
+  #     rec_<tomo>/       <- one self-contained directory per tilt series
+  #     raw_halfMaps/     <- every even_/odd_ half map produced
+  #     cryocare_config/  <- generated cryoCARE .json configs
+  #     cryocare/         <- cryoCARE training data + model
+  #     isonet_config/    <- generated IsoNet star files + ctffind results
+  #     isonet/           <- IsoNet working directory (networks, masks, output)
+  #     denoised_cryoCARE/
+  processing_directory: "/path/to/processing"
+
+
+# -----------------------------------------------------------------------------
+#  Which tomograms are used for which task
+# -----------------------------------------------------------------------------
+#  These are DIRECTORIES (relative to processing_directory, or absolute).
+#  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
+#  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
+#  "TS_01.mrc.mdoc" -> tomogram "TS_01" -> directory "rec_TS_01".
+# -----------------------------------------------------------------------------
+mdocs:
+
+  # Tilt series to reconstruct in  create_halfMaps.
+  preprocessing: "mdocs"
+
+  # Tilt series used to TRAIN cryoCARE / IsoNet.
+  # A small representative subset (3-5 tomograms) is normally plenty.
+  train: "mdocsTrain"
+
+  # Tilt series to denoise in  predict_cryoCARE / predict_isonet.
+  predict: "mdocs"
+
+
+# -----------------------------------------------------------------------------
+#  External programs
+# -----------------------------------------------------------------------------
+#  Either a bare name (looked up on PATH) or an absolute path to the binary.
+#  NOTE: cryoCARE and IsoNet usually live in their own conda environments -
+#  activate the right environment before calling the corresponding step, or
+#  give the absolute path to the executable inside that environment here.
+# -----------------------------------------------------------------------------
+executables:
+  motioncor:         "MotionCor3"
+  aretomo:           "AreTomo2"
+  newstack:          "newstack"                      # IMOD
+  header:            "header"                        # IMOD, used to read the pixel size
+  ctffind:           "ctffind"                       # CTFFIND4, IsoNet defocus estimate
+  cryocare_extract:  "cryoCARE_extract_train_data.py"
+  cryocare_train:    "cryoCARE_train.py"
+  cryocare_predict:  "cryoCARE_predict.py"
+  isonet:            "isonet.py"
+
+
+# -----------------------------------------------------------------------------
+#  GPUs
+# -----------------------------------------------------------------------------
+#  One list, translated into whatever each program expects
+#  (MotionCor3 "-Gpu 0 1", cryoCARE "gpu_id": [0,1], IsoNet "--gpuID 0,1").
+gpus: [0, 1]
+
+
+# -----------------------------------------------------------------------------
+#  Data acquisition
+# -----------------------------------------------------------------------------
+acquisition:
+
+  # Unbinned pixel size of the RAW frames, in Angstrom.
+  # "read" -> taken from the mdoc (PixelSpacing), falling back to IMOD 'header'
+  #           on the first raw frame. Set a number here if that is wrong.
+  pixel_size: "read"
+
+  # Extension of the raw frames: tif, tiff, mrc or eer.
+  frame_extension: "tiff"
+
+  # Gain reference file name inside paths.input_frames. Must be .mrc
+  # (convert a .dm4 with:  dm2mrc input_ref.dm4 output_ref.mrc).
+  # Leave empty if the frames are already gain corrected.
+  gain: ""
+
+  # Constant for the whole dataset. Used by ctffind and written into the
+  # IsoNet star file.
+  voltage: 300.0                 # kV
+  spherical_aberration: 2.7      # mm
+  amplitude_contrast: 0.1
+
+
+# -----------------------------------------------------------------------------
+#  MotionCor3
+# -----------------------------------------------------------------------------
+motioncor:
+
+  # Gain flip. 2 = flip along y. 0 = no flip. See 'MotionCor3 --help'.
+  flip_gain: 2
+
+  # Fourier binning of the frames. 1 = no binning.
+  # The total binning of the final tomogram is  motioncor.binning * aretomo.binning.
+  binning: 2
+
+  iterations: 7
+  tolerance: 0.5
+
+  # Only used when acquisition.frame_extension is "eer".
+  eer_sampling: 1
+  fm_int_file: "fmintFile"
+
+  # Appended verbatim to every MotionCor3 call.
+  extra_args: ""
+
+
+# -----------------------------------------------------------------------------
+#  AreTomo2
+# -----------------------------------------------------------------------------
+aretomo:
+
+  # Binning applied on top of motioncor.binning.
+  binning: 4
+
+  # Reconstruction thickness in BINNED pixels (AreTomo2 -VolZ).
+  # Increase for thick lamellae, decrease to save memory/time.
+  vol_z: 1200
+
+  # Local (patch) alignment, AreTomo2 syntax. Empty string disables it.
+  # Ignored when tilt_split.enabled is true (see below).
+  local_align: "-Patch 4 5"
+
+  # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
+  tilt_axis_correction: true
+
+  dark_tolerance: 0.5
+  wbp: true                      # weighted back projection (-Wbp 1)
+  flip_vol: true                 # -FlipVol 1
+
+  # Appended verbatim to every AreTomo2 call.
+  extra_args: ""
+
+
+# -----------------------------------------------------------------------------
+#  Half-map generation strategy
+# -----------------------------------------------------------------------------
+tilt_split:
+
+  # false (default): MotionCor3 splits the FRAMES of every tilt into an even and
+  #                  an odd sum (-SplitSum 1). Both half stacks contain all tilts.
+  #
+  # true:            MotionCor3 averages all frames, and the aligned tilt SERIES
+  #                  is split instead - even-numbered tilts into one half map,
+  #                  odd-numbered tilts into the other. Use this when the frames
+  #                  are already averaged or too dose-fractionated to split.
+  #                  Local patch alignment is switched off automatically.
+  enabled: false
+
+
+# -----------------------------------------------------------------------------
+#  cryoCARE
+# -----------------------------------------------------------------------------
+#  Written into <processing_directory>/cryocare_config/*.json by
+#  train_cryoCARE / predict_cryoCARE. Delete that directory to regenerate.
+# -----------------------------------------------------------------------------
+cryocare:
+
+  model_name: "denoise_model"
+
+  # --- training data extraction ---
+  patch_shape: [72, 72, 72]
+  num_slices: 1800
+  split: 0.9
+  tilt_axis: "Y"
+  n_normalization_samples: 500
+
+  # --- network training ---
+  epochs: 100
+  steps_per_epoch: 200
+  batch_size: 16
+  unet_kern_size: 3
+  unet_n_depth: 3
+  unet_n_first: 32
+  learning_rate: 0.0004
+
+  # --- prediction ---
+  # Increase if prediction runs out of GPU memory, e.g. [16, 16, 16].
+  n_tiles: [8, 8, 8]
+
+
+# -----------------------------------------------------------------------------
+#  IsoNet
+# -----------------------------------------------------------------------------
+isonet:
+
+  # Epochs for the plain noise2noise denoiser (step 'denoise').
+  denoise_epochs: 50
+
+  # Epochs for the missing-wedge refinement (step 'refine').
+  refine_epochs: 100
+
+  # CTF handling mode passed to denoise/refine.
+  ctf_mode: "network"
+
+  # make_mask
+  density_percentage: 50
+  std_percentage: 80
+
+  # refine
+  mw_weight: 200
+  bfactor: 0
+
+  # Tilt range for the missing-wedge model, in degrees.
+  # Empty (default) = read per tomogram from rec_<tomo>/<tomo>.rawtlt.
+  # prepare_star only accepts ONE range for the whole set, so if the tomograms
+  # disagree the WIDEST range is used and the outliers are named in a warning.
+  # That direction is deliberate: declaring a range wider than a tomogram
+  # really has only leaves it under-corrected, whereas declaring a narrower
+  # one makes IsoNet synthesise over data that was actually measured.
+  # Set an explicit range to override, e.g.  tilt_range: [-60, 60]
+  tilt_range: []
+
+  # Trained networks to use. "auto" picks the most recent network_*.pt from
+  # the corresponding IsoNet output directory. Set an explicit file name
+  # (relative to <processing_directory>/isonet) to pin a specific network.
+  denoise_network: "auto"        # e.g. denoise/network_n2n_unet-medium_96_full.pt
+  refine_network:  "auto"        # e.g. isonet_maps/network_isonet2-n2n_unet-medium_96_full.pt
+
+  # Appended verbatim to the denoise/refine/predict calls.
+  extra_args: ""
+
+
+# -----------------------------------------------------------------------------
+#  CTFFIND4  (defocus estimate for IsoNet, run on the first collected tilt)
+# -----------------------------------------------------------------------------
+#  Run automatically by train_isonet / predict_isonet on the motion-corrected
+#  average of the FIRST tilt of each series. Results are cached as
+#  <processing_directory>/isonet_config/<tomo>_PS.txt and reused if present.
+# -----------------------------------------------------------------------------
+ctffind:
+  box_size: 512
+  min_resolution: 50.0           # Angstrom
+  max_resolution: 5.0            # Angstrom
+  min_defocus: 5000.0            # Angstrom
+  max_defocus: 70000.0           # Angstrom
+  defocus_step: 500.0            # Angstrom

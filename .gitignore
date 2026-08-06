@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+
+# pipeline products
+tomo_denoising_config.yaml
+rec_*/
+raw_halfMaps/
+cryocare_config/
+isonet_config/
+cryocare/
+isonet/
+denoised_*/
+*.mrc
+*.rec
+*.st
+*.aln
+*.rawtlt
+*.star
+
+# build artifacts
+*.egg-info/

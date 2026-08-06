@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tomo-denoising-pipeline"
+version = "1.0.0"
+description = "One-click cryo-ET pipeline: raw frames to denoised tomograms via MotionCor3, IMOD, AreTomo2, cryoCARE and IsoNet."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "DavidKart" }]
+keywords = ["cryo-ET", "tomography", "denoising", "cryoCARE", "IsoNet", "AreTomo"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "PyYAML>=5.4",
+    "numpy>=1.19",
+    "mrcfile>=1.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/DavidKart/Tomo-Denoising-Pipeline"
+
+[project.scripts]
+tomo_denoising = "tomo_denoising.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tomo_denoising = ["templates/*.yaml"]
