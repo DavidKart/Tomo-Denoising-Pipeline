@@ -57,6 +57,9 @@ def write_train_configs(config, pairs):
             "tilt_axis": settings["tilt_axis"],
             "n_normalization_samples": int(settings["n_normalization_samples"]),
             "path": _train_data_dir(config),
+            # Without this, re-running training aborts once the directory
+            # exists - after the normalization pass has already been done.
+            "overwrite": bool(settings["overwrite"]),
         },
     )
 
@@ -91,7 +94,7 @@ def write_predict_config(config, pairs):
             "odd": [odd for _, _, odd in pairs],
             "n_tiles": list(settings["n_tiles"]),
             "output": os.path.join(config.processing_dir, "denoised_cryoCARE"),
-            "overwrite": True,
+            "overwrite": bool(settings["overwrite"]),
             "gpu_id": config.gpus,
         },
     )
@@ -110,9 +113,11 @@ def train(config, dry_run=False):
     for name, _, _ in pairs:
         info("  training on %s" % name)
 
+    # Only the parent is created here. cryoCARE owns train_data/ and model/
+    # and refuses to write into a directory that already exists unless
+    # 'overwrite' is set, so pre-creating them would abort the run after the
+    # normalization pass has already finished.
     ensure_dir(config.cryocare_dir)
-    ensure_dir(_train_data_dir(config))
-    ensure_dir(_model_dir(config))
     logs = ensure_dir(config.cryocare_dir, "logs")
 
     train_data_config, train_config = write_train_configs(config, pairs)

@@ -82,6 +82,7 @@ DEFAULTS = {
         "unet_n_first": 32,
         "learning_rate": 0.0004,
         "n_tiles": [8, 8, 8],
+        "overwrite": True,
     },
     "isonet": {
         "denoise_epochs": 50,

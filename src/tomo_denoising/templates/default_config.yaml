@@ -220,6 +220,12 @@ cryocare:
   # Increase if prediction runs out of GPU memory, e.g. [16, 16, 16].
   n_tiles: [8, 8, 8]
 
+  # cryoCARE refuses to write into an output directory that already exists
+  # unless this is true, which would make every re-run abort - and only after
+  # the normalization pass has already finished. Set false to be warned
+  # instead of silently regenerating existing training data.
+  overwrite: true
+
 
 # -----------------------------------------------------------------------------
 #  IsoNet
