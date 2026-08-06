@@ -247,34 +247,26 @@ class Config(object):
     def resolve_gain(self):
         """Absolute path of the gain reference, or "" when none is configured.
 
-        Accepts an absolute path, a path relative to the working directory, or
-        a bare file name sitting in input_frames - whichever exists. Raises if
-        one is configured but cannot be found, since MotionCor3 would
-        otherwise fail once per tilt with a less obvious message.
+        A standalone path, like the mdoc directories: an absolute path is used
+        as given, a relative one is resolved against the current working
+        directory. It is never joined to input_frames. Raises if one is
+        configured but missing, since MotionCor3 would otherwise fail once per
+        tilt with a less obvious message.
         """
         raw = str(self.data["acquisition"].get("gain") or "").strip()
         if not raw:
             return ""
 
-        candidates = []
-        if os.path.isabs(raw):
-            candidates.append(raw)
-        else:
-            candidates.append(os.path.abspath(raw))
-            candidates.append(os.path.join(self.input_frames, raw))
-
-        seen = []
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.append(candidate)
-            if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+        path = os.path.abspath(raw)
+        if os.path.isfile(path):
+            return path
 
         raise SystemExit(
-            "ERROR: gain reference %r not found. Looked in:\n  %s\n"
-            "Set acquisition.gain to an absolute path, or leave it empty if "
-            "the frames are already gain corrected." % (raw, "\n  ".join(seen))
+            "ERROR: gain reference %r not found at:\n  %s\n"
+            "Relative paths are resolved against the directory you run "
+            "tomo_denoising from. Use an absolute path, or leave "
+            "acquisition.gain empty if the frames are already gain corrected."
+            % (raw, path)
         )
 
     # ----------------------------------------------------------- directories

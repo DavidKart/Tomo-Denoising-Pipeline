@@ -45,32 +45,26 @@ class TomoDirs(object):
 # --------------------------------------------------------------- MotionCor3
 
 
-def resolve_input_file(config, value, key):
+def resolve_input_file(value, key):
     """Resolve an auxiliary input file the same way as the gain reference.
 
-    Accepts an absolute path, a path relative to the working directory, or a
-    bare file name sitting in input_frames - whichever exists. Returns "" when
-    nothing is configured, and raises when a value is set but not found.
+    Absolute as given, relative against the current working directory, never
+    joined to input_frames. Returns "" when nothing is configured, and raises
+    when a value is set but missing.
     """
     raw = str(value or "").strip()
     if not raw:
         return ""
 
-    candidates = ([raw] if os.path.isabs(raw)
-                  else [os.path.abspath(raw),
-                        os.path.join(config.input_frames, raw)])
-    seen = []
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.append(candidate)
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+    path = os.path.abspath(raw)
+    if os.path.isfile(path):
+        return path
 
     raise SystemExit(
-        "ERROR: %s %r not found. Looked in:\n  %s\n"
-        "Set it to an absolute path, or leave it empty to omit the option."
-        % (key, raw, "\n  ".join(seen))
+        "ERROR: %s %r not found at:\n  %s\n"
+        "Relative paths are resolved against the directory you run "
+        "tomo_denoising from. Use an absolute path, or leave it empty to omit "
+        "the option." % (key, raw, path)
     )
 
 
@@ -126,7 +120,7 @@ def run_motioncor(config, series, dirs, dry_run=False):
             command += ["-FlipGain", str(int(mc["flip_gain"]))]
         if extension == "eer":
             command += ["-EerSampling", str(mc["eer_sampling"])]
-            fm_int = resolve_input_file(config, mc["fm_int_file"],
+            fm_int = resolve_input_file(mc["fm_int_file"],
                                         "motioncor.fm_int_file")
             if fm_int:
                 command += ["-FmIntFile", fm_int]

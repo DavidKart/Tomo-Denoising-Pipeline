@@ -108,8 +108,9 @@ acquisition:
 
   # Gain reference. Must be .mrc
   # (convert a .dm4 with:  dm2mrc input_ref.dm4 output_ref.mrc).
-  # May be an absolute path, a path relative to where you run tomo_denoising,
-  # or a bare file name sitting in paths.input_frames - whichever exists.
+  # A path in its own right: absolute is used as given, relative is resolved
+  # against the directory you run tomo_denoising from. It is NOT looked up
+  # inside paths.input_frames.
   # Leave empty if the frames are already gain corrected.
   gain: ""
 
@@ -136,9 +137,9 @@ motioncor:
   tolerance: 0.5
 
   # Only used when acquisition.frame_extension is "eer".
-  # fm_int_file is resolved like the gain reference (absolute, relative to the
-  # working directory, or a bare name inside input_frames). Leave it empty to
-  # omit -FmIntFile entirely.
+  # fm_int_file is resolved like the gain reference: absolute as given,
+  # relative against the directory you run tomo_denoising from.
+  # Leave it empty to omit -FmIntFile entirely.
   eer_sampling: 1
   fm_int_file: ""
 
