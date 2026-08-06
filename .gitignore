@@ -22,6 +22,3 @@ denoised_*/
 *.aln
 *.rawtlt
 *.star
-
-# build artifacts
-*.egg-info/
