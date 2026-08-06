@@ -20,9 +20,10 @@ DEFAULTS = {
         "processing_directory": "",
     },
     "mdocs": {
-        "preprocessing": "mdocs",
-        "train": "mdocsTrain",
-        "predict": "mdocs",
+        # Standalone directories, never joined to processing_directory.
+        "preprocessing": "",
+        "train": "",
+        "predict": "",
     },
     "executables": {
         "motioncor": "MotionCor3",
@@ -265,11 +266,22 @@ class Config(object):
         return self.sub("rec_" + tomo_name)
 
     def mdoc_dir(self, which):
-        """Absolute path of the mdoc directory for 'preprocessing'/'train'/'predict'."""
-        raw = str(self.data["mdocs"][which])
-        if os.path.isabs(raw):
-            return os.path.abspath(raw)
-        return self.sub(raw)
+        """Absolute path of the mdoc directory for 'preprocessing'/'train'/'predict'.
+
+        These are standalone locations - they are deliberately NOT joined to
+        processing_directory, so the mdocs can live anywhere. An absolute path
+        is used as given; a relative one is resolved against the current
+        working directory.
+        """
+        raw = str(self.data["mdocs"].get(which) or "").strip()
+        if not raw or raw.startswith("/path/to"):
+            raise SystemExit(
+                "ERROR: mdocs.%s is not set in %s\n"
+                "Set it to the directory holding the .mdoc files for this "
+                "step. It may be anywhere - it is not required to be inside "
+                "the processing directory." % (which, self.source)
+            )
+        return os.path.abspath(raw)
 
 
 def load_config(path=None):

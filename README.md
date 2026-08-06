@@ -75,16 +75,23 @@ paths:
 `input_frames` and `processing_directory` are deliberately separate — the raw
 data stays untouched.
 
-Then place your `.mdoc` files:
+Then point at your `.mdoc` directories:
 
-```
-<processing_directory>/mdocs/         all tilt series (preprocessing + prediction)
-<processing_directory>/mdocsTrain/    the 3-5 representative series used for training
+```yaml
+mdocs:
+  preprocessing: "/data/session42/mdocs"        # all series to reconstruct
+  train:         "/data/session42/mdocsTrain"   # the 3-5 used for training
+  predict:       "/data/session42/mdocs"        # all series to denoise
 ```
 
-Every `*.mdoc` in those directories is used. The directories are configurable
-under `mdocs:`; the tomogram name is the mdoc file name with `.mdoc` (and a
-trailing `.mrc`/`.st`) stripped, so `TS_01.mrc.mdoc` becomes tomogram `TS_01`.
+These are **independent locations** — they are not interpreted relative to
+`processing_directory` and may live anywhere, including next to your raw data.
+An absolute path is used as given; a relative one resolves against the
+directory you run `tomo_denoising` from.
+
+Every `*.mdoc` in each directory is used. The tomogram name is the mdoc file
+name with `.mdoc` (and a trailing `.mrc`/`.st`) stripped, so `TS_01.mrc.mdoc`
+becomes tomogram `TS_01`, reconstructed into `rec_TS_01/`.
 
 ### 2. `create_halfMaps`
 

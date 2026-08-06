@@ -24,25 +24,30 @@ paths:
   input_frames: "/path/to/raw/frames"
 
   # Directory where ALL processing happens and all results are written.
-  # Created if it does not exist. Everything below is relative to it:
+  # Created if it does not exist. Everything below is created inside it:
   #
   #   <processing_directory>/
-  #     mdocs/            <- mdocs.preprocessing / mdocs.predict (see below)
-  #     mdocsTrain/       <- mdocs.train
   #     rec_<tomo>/       <- one self-contained directory per tilt series
   #     raw_halfMaps/     <- every even_/odd_ half map produced
   #     cryocare_config/  <- generated cryoCARE .json configs
   #     cryocare/         <- cryoCARE training data + model
-  #     isonet_config/    <- generated IsoNet star files + ctffind results
-  #     isonet/           <- IsoNet working directory (networks, masks, output)
   #     denoised_cryoCARE/
+  #     isonet_config/    <- ctffind results + the star files
+  #     isonet/           <- IsoNet working directory (networks, masks, output)
+  #
+  # The mdoc directories are NOT part of this layout - see the 'mdocs'
+  # section below; they are separate locations and may live anywhere.
   processing_directory: "/path/to/processing"
 
 
 # -----------------------------------------------------------------------------
 #  Which tomograms are used for which task
 # -----------------------------------------------------------------------------
-#  These are DIRECTORIES (relative to processing_directory, or absolute).
+#  These are DIRECTORIES holding .mdoc files. They are independent locations
+#  and may live anywhere - they are NOT interpreted relative to
+#  processing_directory. An absolute path is used as given; a relative one is
+#  resolved against the directory you run tomo_denoising from.
+#
 #  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
 #  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
 #  "TS_01.mrc.mdoc" -> tomogram "TS_01" -> directory "rec_TS_01".
@@ -50,14 +55,14 @@ paths:
 mdocs:
 
   # Tilt series to reconstruct in  create_halfMaps.
-  preprocessing: "mdocs"
+  preprocessing: "/path/to/mdocs"
 
   # Tilt series used to TRAIN cryoCARE / IsoNet.
   # A small representative subset (3-5 tomograms) is normally plenty.
-  train: "mdocsTrain"
+  train: "/path/to/mdocsTrain"
 
   # Tilt series to denoise in  predict_cryoCARE / predict_isonet.
-  predict: "mdocs"
+  predict: "/path/to/mdocs"
 
 
 # -----------------------------------------------------------------------------
