@@ -202,14 +202,29 @@ def write_rawtlt(dirs, series, averaged_names, tomo_name, dry_run=False):
     return rawtlt, ordered_names
 
 
-def split_rawtlt(rawtlt_path, even_out, odd_out):
-    """Split an angle file by tilt number, matching the stack split."""
+def split_rawtlt(rawtlt_path, even_out, odd_out,
+                 even_sections=None, odd_sections=None):
+    """Split an angle file to match the stack split.
+
+    The sections come from the alignment, so dark tilts are dropped here too
+    and the angle file stays in step with its stack.
+    """
     with open(rawtlt_path, encoding="utf-8", errors="replace") as handle:
         angles = [line.strip() for line in handle if line.strip()]
-    with open(even_out, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(angles[::2]) + "\n")
-    with open(odd_out, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(angles[1::2]) + "\n")
+
+    if even_sections is None:
+        even_sections = list(range(0, len(angles), 2))
+    if odd_sections is None:
+        odd_sections = list(range(1, len(angles), 2))
+
+    for sections, out in ((even_sections, even_out), (odd_sections, odd_out)):
+        chosen = [angles[s] for s in sections if 0 <= s < len(angles)]
+        if len(chosen) != len(sections):
+            warn("%s has %d angles but the alignment refers to section %d"
+                 % (os.path.basename(rawtlt_path), len(angles),
+                    max(sections) if sections else -1))
+        with open(out, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(chosen) + "\n")
     return even_out, odd_out
 
 
@@ -321,56 +336,133 @@ def reconstruct_half(config, dirs, stack, aln, output, log_name, apix_binned,
 # ---------------------------------------------------------------- tilt splitting
 
 
-def split_aln_file(aln_path, even_out, odd_out):
-    """Split an AreTomo .aln into an even-tilt and an odd-tilt half.
+_DARK_FRAME_RE = re.compile(r"DarkFrame\s*=\s*(\d+)")
 
-    Section indices and the RawSize header are renumbered so each half is a
-    consistent description of half the sections.
+
+def parse_aln(aln_path):
+    """Read an AreTomo .aln into ``(header_lines, dark_sections, rows)``.
+
+    ``rows`` is ``[(section_index, line), ...]`` for the sections AreTomo
+    actually aligned. Sections it rejected appear only as ``# DarkFrame``
+    headers and are returned separately - they have no alignment, so they
+    cannot be carried into a split.
     """
-    with open(aln_path, encoding="utf-8", errors="replace") as source, \
-            open(even_out, "w", encoding="utf-8") as even, \
-            open(odd_out, "w", encoding="utf-8") as odd:
-        count = 0
-        for line in source:
-            if line.startswith("#"):
-                if "RawSize" in line:
-                    match = re.findall(r"\d+", line)[2]
-                    even.write(line.replace(
-                        match, str(int(np.ceil(int(match) / 2)))))
-                    odd.write(line.replace(
-                        match, str(int(np.floor(int(match) / 2)))))
-                    continue
-                even.write(line)
-                odd.write(line)
+    header, dark, rows = [], [], []
+    with open(aln_path, encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                match = _DARK_FRAME_RE.search(stripped)
+                if match:
+                    dark.append(int(match.group(1)))
+                else:
+                    header.append(line)
                 continue
-            match = re.search(r"\d+", line)
-            if match is None:
-                even.write(line)
-                odd.write(line)
+            if not stripped:
                 continue
-            token = match.group()
-            if count % 2 == 0:
-                even.write(line.replace(
-                    token, str(int(np.ceil(int(token) / 2)))))
+            try:
+                section = int(float(stripped.split()[0]))
+            except (ValueError, IndexError):
+                continue
+            rows.append((section, line))
+    return header, dark, rows
+
+
+def _set_raw_size_z(line, sections):
+    """Rewrite the third number of a ``# RawSize = x y z`` header."""
+    numbers = list(re.finditer(r"\d+", line))
+    if len(numbers) < 3:
+        return line
+    third = numbers[2]
+    return line[:third.start()] + str(sections) + line[third.end():]
+
+
+def write_split_aln(header, rows, out_path):
+    """Write one half of a split alignment, renumbered from zero.
+
+    No ``# DarkFrame`` headers are emitted: the dark sections are left out of
+    the split stack entirely, so every section the half stack contains is
+    described by a row here.
+    """
+    with open(out_path, "w", encoding="utf-8") as handle:
+        for line in header:
+            if "RawSize" in line:
+                handle.write(_set_raw_size_z(line, len(rows)) + "\n")
             else:
-                odd.write(line.replace(
-                    token, str(int(np.floor(int(token) / 2)))))
-            count += 1
+                handle.write(line + "\n")
+        for index, (_, line) in enumerate(rows):
+            handle.write(
+                re.sub(r"^(\s*)\d+",
+                       lambda m, i=index: "%s%d" % (m.group(1), i),
+                       line) + "\n")
+    return out_path
 
 
-def split_stack_file(stack_path, even_out, odd_out):
-    """Split a tilt series stack into even-numbered and odd-numbered tilts."""
+def split_alignment(aln_path, even_out, odd_out):
+    """Split an AreTomo .aln by tilt number.
+
+    Returns ``(even_sections, odd_sections)`` - the ORIGINAL section indices
+    that went into each half, so the stack and the angle file can be split to
+    match exactly.
+
+    Sections AreTomo marked dark are dropped rather than split. They carry no
+    alignment, so a half stack that still contained them would have more
+    sections than its .aln describes, and AreTomo would be handed an
+    inconsistent pair.
+    """
+    header, dark, rows = parse_aln(aln_path)
+    if not rows:
+        raise CommandError("no alignment rows in %s" % aln_path)
+
+    # Alternate over the sections that survived, not over raw section numbers:
+    # with leading sections dropped as dark, raw parity no longer says which
+    # half a tilt belongs to.
+    even_rows = rows[0::2]
+    odd_rows = rows[1::2]
+
+    write_split_aln(header, even_rows, even_out)
+    write_split_aln(header, odd_rows, odd_out)
+
+    if dark:
+        info("  %d dark section(s) excluded from the tilt split: %s"
+             % (len(dark), ", ".join(str(d) for d in sorted(dark))))
+    return [s for s, _ in even_rows], [s for s, _ in odd_rows]
+
+
+def split_stack_file(stack_path, even_out, odd_out,
+                     even_sections=None, odd_sections=None):
+    """Write two half stacks holding the given sections of *stack_path*.
+
+    Without explicit sections this falls back to plain alternation, which is
+    the same thing when AreTomo rejected nothing.
+    """
     import mrcfile
 
     with mrcfile.open(stack_path, permissive=True) as source:
         data = source.data
         voxel_size = source.voxel_size
-        with mrcfile.new(even_out, overwrite=True) as target:
-            target.set_data(np.float32(data[::2, :, :]))
-            target.voxel_size = voxel_size
-        with mrcfile.new(odd_out, overwrite=True) as target:
-            target.set_data(np.float32(data[1::2, :, :]))
-            target.voxel_size = voxel_size
+        total = data.shape[0]
+
+        if even_sections is None:
+            even_sections = list(range(0, total, 2))
+        if odd_sections is None:
+            odd_sections = list(range(1, total, 2))
+
+        for sections, out in ((even_sections, even_out),
+                              (odd_sections, odd_out)):
+            usable = [s for s in sections if 0 <= s < total]
+            if len(usable) != len(sections):
+                warn("%s: the alignment refers to sections outside the stack "
+                     "(%d of %d usable)"
+                     % (os.path.basename(stack_path), len(usable),
+                        len(sections)))
+            if not usable:
+                raise CommandError("no sections left for %s" % out)
+            with mrcfile.new(out, overwrite=True) as target:
+                target.set_data(np.float32(data[usable, :, :]))
+                target.voxel_size = voxel_size
+    return even_out, odd_out
 
 
 def tiltsplit_binning(config, apix_binned):
@@ -664,9 +756,17 @@ def tilt_split_half_maps(config, prep, aln, log, force=False, dry_run=False):
 
     if not dry_run:
         try:
-            split_stack_file(prep.full_stack, even_stack, odd_stack)
-            split_aln_file(aln, even_aln, odd_aln)
-            split_rawtlt(prep.rawtlt, even_tlt, odd_tlt)
+            # The alignment decides the split: it knows which sections AreTomo
+            # actually solved, so the stack and the angle file follow from it
+            # rather than from raw section parity.
+            even_sections, odd_sections = split_alignment(
+                aln, even_aln, odd_aln)
+            split_stack_file(prep.full_stack, even_stack, odd_stack,
+                             even_sections, odd_sections)
+            split_rawtlt(prep.rawtlt, even_tlt, odd_tlt,
+                         even_sections, odd_sections)
+            info("  %s: tilt split into %d + %d sections"
+                 % (name, len(even_sections), len(odd_sections)))
         except Exception as exc:                      # noqa: BLE001
             log.fail(name, "could not split the tilt series: %s" % exc)
             log.task("AreTomo2 (tilt halves)", False, name)
