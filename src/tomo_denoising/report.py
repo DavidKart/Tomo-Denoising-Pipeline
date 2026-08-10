@@ -25,6 +25,7 @@ import os
 
 import numpy as np
 
+from .mdoc import match_tomo_name
 from .utils import ensure_dir, info, warn
 
 #: Where each denoiser leaves its predictions, relative to the processing dir.
@@ -61,23 +62,19 @@ def _candidate_files(directory):
 def find_denoised(config, denoiser, tomo_names):
     """Map tomogram name -> denoised volume, for one denoiser.
 
-    Files are matched by looking for a tomogram name inside the file name, so
-    whatever prefixes or suffixes the denoiser adds do not matter. The longest
-    matching name wins, so TS_1 cannot steal TS_10's file.
+    The denoisers wrap the tomogram name in affixes of their own, so the name
+    is matched as a whole underscore-delimited run rather than as a plain
+    substring - otherwise Position_1 would claim Position_10's file.
     """
     matches = {}
-    ordered = sorted(tomo_names, key=len, reverse=True)
-
     for relative in DENOISER_OUTPUTS.get(denoiser, []):
         directory = os.path.join(config.processing_dir, relative)
         if not os.path.isdir(directory):
             continue
         for path in _candidate_files(directory):
-            base = os.path.basename(path)
-            for name in ordered:
-                if name in base and name not in matches:
-                    matches[name] = path
-                    break
+            name = match_tomo_name(path, tomo_names)
+            if name is not None and name not in matches:
+                matches[name] = path
     return matches
 
 

@@ -25,13 +25,21 @@ REPORT_NAME = "tilt_axis_refinement.txt"
 
 _ALN_ROT_COLUMN = 1
 
-#: Patterns AreTomo2 has used to report the solved tilt axis in its log.
+#: Patterns for the solved tilt axis in an AreTomo log.
+#:
+#: These are a LAST RESORT, used only when no .aln exists. AreTomo also prints
+#: its coarse rotation search - a grid of whole-degree candidates - and those
+#: lines look very much like a result, so anything matched here is treated as
+#: unreliable and reported as such. The .aln ROT column is the real answer.
 _LOG_PATTERNS = [
-    re.compile(r"[Nn]ew tilt axis angle[^-\d]*(-?\d+\.?\d*)"),
-    re.compile(r"[Tt]ilt axis angle[^-\d]*(-?\d+\.?\d*)"),
-    re.compile(r"[Bb]est tilt axis[^-\d]*(-?\d+\.?\d*)"),
-    re.compile(r"[Rr]otation angle[^-\d]*(-?\d+\.?\d*)"),
+    re.compile(r"[Nn]ew tilt axis angle\s*[:=]\s*(-?\d+\.?\d*)"),
+    re.compile(r"[Rr]efined tilt axis\s*[:=]\s*(-?\d+\.?\d*)"),
+    re.compile(r"[Bb]est tilt axis\s*[:=]\s*(-?\d+\.?\d*)"),
 ]
+
+#: Beyond this, a "refined" angle cannot have come from a +/-3 degree search.
+REFINE_WINDOW = 3.0
+SUSPICIOUS_DEVIATION = 5.0
 
 
 # --------------------------------------------------------------- angle maths
@@ -135,20 +143,26 @@ def combine_tilt_axes(angles):
 
 
 def tilt_axis_from_aln(aln_path):
-    """Median of the ROT column of an AreTomo .aln file."""
+    """Median of the ROT column of an AreTomo .aln file.
+
+    This is the authoritative source: the .aln is a structured table whose
+    second column is the tilt axis rotation of each section, so there is
+    nothing to guess at::
+
+        # SEC     ROT         GMAG       TX  ...
+            0    -84.3235     1.00000   -12.345 ...
+
+    The median over sections is taken because a single tilt axis run writes the
+    same value on every row anyway, and a variable one should not be
+    represented by whichever row happened to come first.
+    """
     if not aln_path or not os.path.isfile(aln_path):
         return None
     rotations = []
     with open(aln_path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                for pattern in _LOG_PATTERNS:
-                    match = pattern.search(stripped)
-                    if match:
-                        return float(match.group(1))
+            if not stripped or stripped.startswith("#"):
                 continue
             parts = stripped.split()
             if len(parts) > _ALN_ROT_COLUMN:
@@ -179,11 +193,27 @@ def tilt_axis_from_log(log_path):
 
 
 def read_tilt_axis(aln_path, log_path):
-    """Best available tilt axis for one aligned tilt series."""
+    """Best available tilt axis for one aligned tilt series.
+
+    Returns ``(angle, source)``. The .aln is tried FIRST and the log only if
+    there is no .aln at all: AreTomo prints its whole-degree coarse rotation
+    search to the log, and those lines are indistinguishable from a result by
+    pattern matching alone. Reading them produced nonsense - integer angles
+    scattered over tens of degrees, including values outside the +/-3 degree
+    window a supplied starting angle restricts the search to.
+    """
+    value = tilt_axis_from_aln(aln_path)
+    if value is not None:
+        return value, "aln"
+
     value = tilt_axis_from_log(log_path)
-    if value is None:
-        value = tilt_axis_from_aln(aln_path)
-    return value
+    if value is not None:
+        warn("no .aln for %s - falling back to the AreTomo log, which is not "
+             "reliable for this. Check the result."
+             % os.path.basename(log_path or "?"))
+        return value, "log (unreliable)"
+
+    return None, "not found"
 
 
 # -------------------------------------------------------------------- subsets
@@ -235,11 +265,22 @@ def write_report(config, rows, final_angle, note=""):
         else:
             lines.append("  started from : %+.3f deg (refined within +/-3 deg)"
                          % row["initial"])
+        sources = row.get("sources") or {}
         for name, angle in sorted(row["measurements"].items()):
+            source = sources.get(name, "")
             if angle is None:
-                lines.append("    %-28s  no tilt axis reported" % name)
+                lines.append("    %-28s  no tilt axis reported  [%s]"
+                             % (name, source or "not found"))
             else:
-                lines.append("    %-28s  %+8.3f deg" % (name, angle))
+                flag = ""
+                if row.get("initial") is not None:
+                    drift = abs(fold_angles([row["initial"], angle])[1]
+                                - fold_angles([row["initial"], angle])[0])
+                    if drift > SUSPICIOUS_DEVIATION:
+                        flag = ("   <- %.1f deg from the start, outside the "
+                                "+/-%.0f deg search" % (drift, REFINE_WINDOW))
+                lines.append("    %-28s  %+8.3f deg  [%s]%s"
+                             % (name, angle, source or "aln", flag))
         if row["angle"] is None:
             lines.append("  --> no usable measurements")
         else:

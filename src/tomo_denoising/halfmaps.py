@@ -493,6 +493,7 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
         info("iteration %d/%d on: %s" % (iteration, iterations, ", ".join(names)))
 
         measurements = {}
+        sources = {}
         for name in names:
             prep = by_name[name]
             # -VolZ 0 aligns without reconstructing, which is all we need here.
@@ -510,7 +511,22 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
                 continue
             aln = find_aln(prep.full_stack, prep.dirs.aretomo_full,
                            prep.dirs.stacks)
-            measurements[name] = tiltaxis.read_tilt_axis(aln, log_file)
+            value, source = tiltaxis.read_tilt_axis(aln, log_file)
+            measurements[name] = value
+            sources[name] = source
+
+            # A starting angle restricts AreTomo to a +/-3 degree search, so a
+            # result far outside that window did not come from the alignment.
+            if value is not None and angle is not None:
+                drift = abs(tiltaxis.fold_angles([angle, value])[1]
+                            - tiltaxis.fold_angles([angle, value])[0])
+                if drift > tiltaxis.SUSPICIOUS_DEVIATION:
+                    warn("%s: reported %+.3f deg after starting from %+.3f - "
+                         "that is %.1f deg, outside the +/-%.0f deg AreTomo "
+                         "searches. The value was read from %s and is probably "
+                         "not the solved tilt axis."
+                         % (name, value, angle, drift,
+                            tiltaxis.REFINE_WINDOW, source))
 
         usable = [v for v in measurements.values() if v is not None]
         combined, method = tiltaxis.combine_tilt_axes(usable)
@@ -523,10 +539,17 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
             "iteration": iteration,
             "initial": angle,
             "measurements": measurements,
+            "sources": sources,
             "angle": combined,
             "method": method,
             "spread": spread,
         })
+
+        if spread is not None and spread > 10.0:
+            warn("iteration %d: the tilt axis measurements span %.1f deg. "
+                 "For one microscope they should agree to within a couple of "
+                 "degrees - check %s before trusting the result."
+                 % (iteration, spread, tiltaxis.report_path(config)))
 
         if combined is None:
             warn("iteration %d produced no usable tilt axis." % iteration)

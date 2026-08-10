@@ -12,7 +12,7 @@ been picked yet, and captioning the results figure (see :mod:`report`).
 import csv
 import os
 
-from .mdoc import find_mdocs, tomo_name_from_mdoc
+from .mdoc import find_mdocs, match_tomo_name, tomo_name_from_mdoc
 from .steplog import StepLog
 from .utils import (
     banner,
@@ -50,33 +50,30 @@ def summary_path(config):
     return os.path.join(config.resolve_dir, SUMMARY_NAME)
 
 
-def _strip_ids(identifier):
-    """Turn a RESOLVE id back into the tomogram name.
+def known_tomo_names(config):
+    """Every tomogram name the pipeline knows about, from the mdocs."""
+    return [tomo_name_from_mdoc(p)
+            for p in find_mdocs(config.mdoc_dir("preprocessing"))]
 
-    The half maps are named ``even_<tomo>_rec_tomo.mrc``, so the id RESOLVE
-    reports may keep the prefix, the ``_rec_tomo`` suffix, or the extension.
+
+def read_summary(config, tomo_names=None):
+    """Parse summary.tsv into ``{tomo_name: Measurement}``.
+
+    RESOLVE ids carry its own affixes, e.g.
+    ``odd_Position_1_rec_tomo_Tomograms_locRes``. Rather than trying to strip
+    every possible one, each id is matched against the tomogram names taken
+    from the mdocs, as a whole underscore-delimited run - so Position_1 never
+    picks up Position_10's row.
     """
-    name = os.path.basename(str(identifier).strip())
-    for extension in (".mrc", ".rec", ".map"):
-        if name.lower().endswith(extension):
-            name = name[: -len(extension)]
-    for prefix in (EVEN_ID, ODD_ID, "EVN_", "ODD_"):
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-    for suffix in ("_rec_tomo", "_rec", "_tomo"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-            break
-    return name
-
-
-def read_summary(config):
-    """Parse summary.tsv into ``{tomo_name: Measurement}``."""
     path = summary_path(config)
     if not os.path.isfile(path):
         return {}
 
+    if tomo_names is None:
+        tomo_names = known_tomo_names(config)
+
     results = {}
+    unmatched = []
     with open(path, encoding="utf-8", errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         if not reader.fieldnames:
@@ -99,9 +96,19 @@ def read_summary(config):
                 signal = float(row[sig_key]) if sig_key else float("nan")
             except (TypeError, ValueError):
                 signal = float("nan")
-            name = _strip_ids(row[id_key])
-            if name:
-                results[name] = Measurement(name, resolution, signal)
+
+            identifier = str(row[id_key]).strip()
+            name = match_tomo_name(identifier, tomo_names)
+            if name is None:
+                unmatched.append(identifier)
+                continue
+            results[name] = Measurement(name, resolution, signal)
+
+    if unmatched:
+        warn("%d row(s) in %s could not be matched to a tomogram: %s\n"
+             "  known tomograms: %s"
+             % (len(unmatched), path, ", ".join(unmatched[:5]),
+                ", ".join(sorted(tomo_names)[:10]) or "(none)"))
     return results
 
 

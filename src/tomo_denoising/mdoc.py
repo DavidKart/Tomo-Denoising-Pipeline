@@ -105,6 +105,30 @@ def parse_mdoc(mdoc_path):
     )
 
 
+def matches_tomo(text, tomo_name):
+    """True when *text* refers to *tomo_name*, and only to that tomogram.
+
+    Other programs wrap the tomogram name in prefixes and suffixes of their
+    own - RESOLVE reports ``odd_Position_1_rec_tomo_Tomograms_locRes``, cryoCARE
+    writes ``denoised_Position_1_rec_tomo.mrc`` - so the name is matched as a
+    whole underscore-delimited run rather than by stripping known affixes.
+
+    The boundaries matter: a plain substring test would let ``Position_1`` match
+    ``Position_10``.
+    """
+    stem = os.path.splitext(os.path.basename(str(text)))[0]
+    pattern = r"(?:^|_)%s(?:_|$)" % re.escape(str(tomo_name))
+    return re.search(pattern, stem) is not None
+
+
+def match_tomo_name(text, tomo_names):
+    """Which of *tomo_names* does *text* refer to? Longest match wins."""
+    for name in sorted(tomo_names, key=len, reverse=True):
+        if matches_tomo(text, name):
+            return name
+    return None
+
+
 def find_mdocs(directory):
     """Return every ``*.mdoc`` inside *directory*, sorted by name."""
     if not os.path.isdir(directory):
