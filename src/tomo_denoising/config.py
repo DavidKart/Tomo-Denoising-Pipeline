@@ -35,7 +35,9 @@ DEFAULTS = {
         "cryocare_train": "cryoCARE_train.py",
         "cryocare_predict": "cryoCARE_predict.py",
         "isonet": "isonet.py",
+        "resolve": "RESOLVE",
     },
+    "overwrite": False,
     "gpus": [0, 1],
     "acquisition": {
         "pixel_size": "read",
@@ -62,10 +64,22 @@ DEFAULTS = {
         "dark_tolerance": 0.5,
         "wbp": True,
         "flip_vol": True,
+        "tilt_axis_iterations": 3,
+        "tilt_axis_subset_size": 10,
+        "tilt_axis_seed": 0,
         "extra_args": "",
     },
     "tilt_split": {
-        "enabled": False,
+        "enabled": True,
+        "target_pixel_size": 50.0,
+    },
+    "quality_check": {
+        "fast": True,
+        "gpu_enabled": True,
+        "cpu_threads": 16,
+        "choose_training_set": True,
+        "min_signal_ratio": 0.25,
+        "outlier_factor": 1.5,
     },
     "cryocare": {
         "model_name": "denoise_model",
@@ -202,12 +216,8 @@ class Config(object):
             )
         self.data["acquisition"]["frame_extension"] = ext
 
-        if self.tilt_split and str(self.data["aretomo"]["local_align"]).strip():
-            print(
-                "[config] tilt_split.enabled is true -> disabling "
-                "aretomo.local_align (patches cannot be aligned on half stacks)."
-            )
-            self.data["aretomo"]["local_align"] = ""
+        # Tilt splitting is additive now: it reuses the alignment solved on the
+        # full frame-split run, so local patch alignment stays enabled.
 
     # ------------------------------------------------------------- accessors
     def __getitem__(self, key):
@@ -276,8 +286,29 @@ class Config(object):
         return os.path.join(self.processing_dir, *parts)
 
     @property
+    def overwrite(self):
+        return bool(self.data.get("overwrite", False))
+
+    @property
     def raw_halfmaps_dir(self):
         return self.sub("raw_halfMaps")
+
+    @property
+    def tiltsplit_halfmaps_dir(self):
+        return self.sub("raw_halfMaps_tiltSplit")
+
+    @property
+    def logs_dir(self):
+        return self.sub("logs")
+
+    @property
+    def resolve_dir(self):
+        return self.sub("resolve")
+
+    @property
+    def state_dir(self):
+        """Where completion markers for the resume logic live."""
+        return self.sub("logs", ".state")
 
     @property
     def cryocare_config_dir(self):

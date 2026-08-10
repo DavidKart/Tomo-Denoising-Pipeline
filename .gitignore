@@ -22,3 +22,8 @@ denoised_*/
 *.aln
 *.rawtlt
 *.star
+raw_halfMaps_tiltSplit/
+resolve/
+logs/
+results_*.pdf
+tilt_axis_refinement.txt

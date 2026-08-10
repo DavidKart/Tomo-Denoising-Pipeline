@@ -10,6 +10,7 @@ import json
 import os
 
 from .halfmap_sets import collect_half_maps
+from .steplog import StepLog, step_completed
 from .utils import (
     banner,
     ensure_dir,
@@ -103,15 +104,31 @@ def write_predict_config(config, pairs):
 # ------------------------------------------------------------------ entrypoints
 
 
-def train(config, dry_run=False):
+def train(config, force=None, dry_run=False):
     """``tomo_denoising train_cryoCARE``"""
+    force = config.overwrite if force is None else force
+    with StepLog(config, "train_cryoCARE", force=force) as log:
+        return _train(config, log, force=force, dry_run=dry_run)
+
+
+def _train(config, log, force=False, dry_run=False):
     banner("cryoCARE training")
     require_executable(config.exe("cryocare_extract"), "cryoCARE extraction")
     require_executable(config.exe("cryocare_train"), "cryoCARE training")
 
+    model = _model_tarball(config)
+    if not force and os.path.exists(model) and step_completed(
+            config, "train_cryoCARE"):
+        info("cryoCARE model already trained: %s" % model)
+        log.note("skipped: %s already exists and the previous training "
+                 "completed. Use --force to retrain." % model)
+        return 0
+
     pairs = collect_half_maps(config, "train")
+    log.note("training on %d tomograms:" % len(pairs))
     for name, _, _ in pairs:
         info("  training on %s" % name)
+        log.quiet("    %s" % name)
 
     # Only the parent is created here. cryoCARE owns train_data/ and model/
     # and refuses to write into a directory that already exists unless
@@ -132,12 +149,23 @@ def train(config, dry_run=False):
         log_file=os.path.join(logs, "train.log"),
         dry_run=dry_run)
 
+    if not dry_run and not os.path.exists(_model_tarball(config)):
+        log.fail("cryoCARE training", "no model at %s" % _model_tarball(config))
+        return 1
     info("model: %s" % _model_tarball(config))
+    log.note("model: %s" % _model_tarball(config))
+    log.ok("cryoCARE training")
     return 0
 
 
-def predict(config, dry_run=False):
+def predict(config, force=None, dry_run=False):
     """``tomo_denoising predict_cryoCARE``"""
+    force = config.overwrite if force is None else force
+    with StepLog(config, "predict_cryoCARE", force=force) as log:
+        return _predict(config, log, force=force, dry_run=dry_run)
+
+
+def _predict(config, log, force=False, dry_run=False):
     banner("cryoCARE prediction")
     require_executable(config.exe("cryocare_predict"), "cryoCARE prediction")
 
@@ -152,12 +180,24 @@ def predict(config, dry_run=False):
     output = ensure_dir(config.processing_dir, "denoised_cryoCARE")
     logs = ensure_dir(config.cryocare_dir, "logs")
 
-    predict_config = write_predict_config(config, pairs)
-
-    run([config.exe("cryocare_predict"), "--conf", predict_config],
-        cwd=config.cryocare_dir,
-        log_file=os.path.join(logs, "predict.log"),
-        dry_run=dry_run)
+    if not force and step_completed(config, "predict_cryoCARE") and os.listdir(
+            output):
+        info("cryoCARE prediction already complete: %s" % output)
+        log.note("skipped: %s already holds a completed prediction. "
+                 "Use --force to redo it." % output)
+    else:
+        predict_config = write_predict_config(config, pairs)
+        run([config.exe("cryocare_predict"), "--conf", predict_config],
+            cwd=config.cryocare_dir,
+            log_file=os.path.join(logs, "predict.log"),
+            dry_run=dry_run)
 
     info("denoised tomograms: %s" % output)
+    log.note("denoised tomograms: %s" % output)
+    for name, _, _ in pairs:
+        log.ok(name)
+
+    if not dry_run:
+        from . import report
+        report.refresh_after_prediction(config, "cryoCARE", log=log)
     return 0

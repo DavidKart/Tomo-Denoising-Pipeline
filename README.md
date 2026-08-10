@@ -29,6 +29,7 @@ right one is reachable when you call the corresponding step.
 | [MotionCor3](https://github.com/czimaginginstitute/MotionCor3) | `create_halfMaps` | czimaginginstitute |
 | [AreTomo2](https://github.com/czimaginginstitute/AreTomo2) | `create_halfMaps` | czimaginginstitute |
 | [CTFFIND4](https://grigoriefflab.umassmed.edu/ctffind4) | `*_isonet` | Grigorieff lab |
+| [RESOLVE](https://github.com/DavidKart/RESOLVE) | `quality_check` | DavidKart |
 | [cryoCARE](https://github.com/juglab/cryoCARE_pip) | `*_cryoCARE` | juglab |
 | [IsoNet](https://github.com/IsoNet-cryoET/IsoNet) | `*_isonet` | IsoNet-cryoET |
 
@@ -36,7 +37,7 @@ right one is reachable when you call the corresponding step.
 > environments. Either activate the right environment before calling that step,
 > or put the absolute path to the executable inside that environment into the
 > `executables` section of the config. `tomo_denoising` itself only needs
-> PyYAML, numpy and mrcfile, so it is happy in any of them.
+> PyYAML, numpy, mrcfile and matplotlib, so it is happy in any of them.
 
 ---
 
@@ -44,19 +45,48 @@ right one is reachable when you call the corresponding step.
 
 ```
 tomo_denoising create_config       # 1. write a config, then edit it
-tomo_denoising create_halfMaps     # 2. frames -> tomograms + even/odd half maps
+tomo_denoising create_halfMaps     # 2. frames -> tomograms + half maps
+tomo_denoising quality_check       # 3. RESOLVE, training set, results figure
 
-tomo_denoising train_cryoCARE      # 3a. cryoCARE
+tomo_denoising train_cryoCARE      # 4a. cryoCARE
 tomo_denoising predict_cryoCARE
 
-tomo_denoising train_isonet        # 3b. IsoNet
+tomo_denoising train_isonet        # 4b. IsoNet
 tomo_denoising predict_isonet
+```
+
+Or all of it at once:
+
+```bash
+tomo_denoising run_pipe --denoiser cryocare
+tomo_denoising run_pipe --denoiser isonet --skip-quality
 ```
 
 Every step reads `./tomo_denoising_config.yaml`. Point at a different one with
 `-c/--config`. Add `-n/--dry-run` to any step to print the exact command lines
 it would run without running them — useful for checking your parameters before
 committing a GPU node.
+
+### Resuming and logs
+
+With `overwrite: false` (the default) every step checks what is already
+finished and only redoes what is missing or was interrupted: tilt series that
+already have half maps are skipped, a completed training is not repeated, and a
+converged tilt axis is reused. `-f/--force` on any step overrides this once;
+`overwrite: true` disables it permanently.
+
+Every step writes a report to `<processing_directory>/logs/<step>.log` saying
+how many tilt series each program succeeded on and naming the ones it failed
+on:
+
+```
+Tilt series: 11 succeeded, 1 failed, 0 skipped (12 total)
+  AreTomo2 (frame halves)  11 of 12 succeeded
+      failed for: TS_07
+  MotionCor3 (tilts)       12 of 12 succeeded
+...
+RESULT: COMPLETED WITH 1 FAILURE(S)
+```
 
 ### 1. `create_config`
 
@@ -110,12 +140,16 @@ one shared directory:
     aretomo_even/             even_TS_01_rec_tomo.mrc + _projXY/_projXZ
     aretomo_odd/              odd_TS_01_rec_tomo.mrc  + _projXY/_projXZ
     logs/                     one log per program call
+    aretomo_tiltSplit_even/   even_TS_01_rec_tomo.mrc  (coarse, for RESOLVE)
+    aretomo_tiltSplit_odd/    odd_TS_01_rec_tomo.mrc
   rec_TS_02/
     ...
   raw_halfMaps/               symlinks - exactly two entries per tomogram
     even_TS_01_rec_tomo.mrc
     odd_TS_01_rec_tomo.mrc
-    ...
+  raw_halfMaps_tiltSplit/     symlinks - the same, tilt-split (for RESOLVE)
+  logs/                       one report per pipeline step
+  tilt_axis_refinement.txt    what the tilt axis converged to, and how
 ```
 
 AreTomo2 derives its side products (`_projXY.mrc`, `_projXZ.mrc`) from the
@@ -127,17 +161,107 @@ link, so cryoCARE and IsoNet see them as ordinary files.
 
 Already-finished tilt series are skipped; pass `--force` to redo them.
 
-**Two ways to make half maps**, selected by `tilt_split.enabled`:
+#### Tilt axis refinement
 
-- `false` (default) — MotionCor3 splits the **frames** of every tilt into an
-  even and an odd sum (`-SplitSum 1`). Both half maps contain all tilts.
-- `true` — MotionCor3 averages all frames and the aligned **tilt series** is
-  split instead: even-numbered tilts into one half map, odd-numbered into the
-  other. Both the stack and the AreTomo `.aln` are split accordingly. Local
-  patch alignment is switched off automatically, since patches cannot be
-  aligned on half stacks.
+The tilt axis belongs to the microscope, not to one tilt series, so it is
+solved once for the dataset and then held fixed — the same idea as WarpTools.
+`aretomo.tilt_axis_iterations` (default 3) alignment rounds each take a
+different random subset of `tilt_axis_subset_size` (default 10) tilt series and
+run AreTomo2 with `-VolZ 0`, which aligns without reconstructing. The angles
+are combined, the result is passed to the next round as `-TiltAxis <angle> 0`
+(AreTomo2 then searches only ±3° around it), and after the last round **all**
+tilt series are reconstructed once with `-TiltAxis <converged> -1` — fixed, no
+further refinement. Set `tilt_axis_iterations: 0` to align every series
+independently instead.
 
-### 3a. cryoCARE
+The angles are combined with the **geometric median of their unit vectors**
+(the mean for three or fewer). Two subtleties are handled explicitly:
+
+- A tilt axis is a line, not a direction — it is defined modulo 180°, so
+  AreTomo2 may report `-84°` for one series and `+96°` for another *for the
+  same axis*. Averaging those naively gives nonsense, so the angles are first
+  folded onto a common branch using the circular mean of the doubled angles.
+- The geometric median is used rather than the mean because it ignores a
+  single bad alignment. With five good series near −85° and one that failed at
+  +12°, the mean gives −98.8° while the median gives −85.0°.
+
+Each round and the final value are recorded in
+`<processing_directory>/tilt_axis_refinement.txt`, which is also what a
+resumed run reads to avoid refining again.
+
+#### Frame splitting and tilt splitting
+
+**Frame splitting always happens.** MotionCor3 splits the frames of every tilt
+into an even and an odd sum (`-SplitSum 1`), and those reconstructions become
+`raw_halfMaps/` — the ones cryoCARE and IsoNet train on.
+
+**Tilt splitting is done in addition** when `tilt_split.enabled` is true (the
+default), and reuses everything the frame-split run already produced. Nothing
+is motion corrected or aligned a second time: only the stack, the `.rawtlt` and
+the `.aln` are split by tilt number, and AreTomo2 runs once more into its own
+subdirectory. The result goes to `raw_halfMaps_tiltSplit/` and is what
+`quality_check` measures.
+
+Because those only feed the resolution estimate, they are reconstructed much
+more coarsely: `tilt_split.target_pixel_size` (default 50 Å) sets the pixel
+size aimed for and the binning is derived from it. Binning is an integer so the
+target is approached, not hit, and the value reached is reported:
+
+```
+TS_01: tilt split at bin 14 -> 51.80 A/px (target 50.0)
+```
+
+### 3. `quality_check`
+
+```bash
+tomo_denoising quality_check
+```
+
+Runs [RESOLVE](https://github.com/DavidKart/RESOLVE) in batch mode over
+`raw_halfMaps_tiltSplit/` — it needs two genuinely independent reconstructions
+of the same volume, which is what the tilt split provides. Everything RESOLVE
+writes lands in `<processing_directory>/resolve/`, including `summary.tsv` with
+one row per tomogram: `id`, `median_resolution`, `signal_ratio`.
+
+That drives two things.
+
+**Choosing a training set.** If `mdocs.train` does not exist or holds no
+`.mdoc` files, it is populated by symlinking the best tomograms' mdocs from
+`mdocs.preprocessing`. An existing selection is never touched.
+
+| tomograms measured | chosen |
+| --- | --- |
+| < 10 | 3 |
+| ≥ 10 | 4 |
+| ≥ 20 | 5 |
+
+Anything with `signal_ratio` below `min_signal_ratio` (default 0.25) is never
+eligible, however good its resolution. Of those chosen, any whose resolution is
+worse than `outlier_factor` (default 1.5) times the best is dropped, even if
+that leaves only two — one bad tomogram skews a small training set. If nothing
+qualifies, the run stops and says so in the log, leaving the choice to you.
+
+**The results figure.** `results_<denoiser>.pdf` in the base processing
+directory: a central Z, Y and X slice of every **denoised** tomogram, laid out
+like 3dmod's XYZ window —
+
+```
+  +-----------+
+  |    XZ     |          XZ : slice at the central Y
+  +-----------+---+
+  |           |   |
+  |    XY     |ZY |       XY : slice at the central Z (the main view)
+  |           |   |       ZY : slice at the central X
+  +-----------+---+
+```
+
+— with square pixels, origin bottom-left, captioned with that tomogram's
+resolution and signal ratio, sorted best resolution first, nine per page. It is
+built whenever both halves exist: after `quality_check` if a denoising result
+is already there, and after a prediction if RESOLVE results are already there.
+If both cryoCARE and IsoNet have results, both files are written.
+
+### 4a. cryoCARE
 
 ```bash
 tomo_denoising train_cryoCARE      # uses mdocs.train
@@ -157,7 +281,7 @@ denoised_cryoCARE/  the denoised tomograms
 If prediction runs out of GPU memory, raise `cryocare.n_tiles` (e.g. to
 `[16, 16, 16]`).
 
-### 3b. IsoNet
+### 4b. IsoNet
 
 ```bash
 tomo_denoising train_isonet        # uses mdocs.train

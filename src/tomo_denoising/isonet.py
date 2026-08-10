@@ -19,6 +19,7 @@ import os
 
 from .ctffind import run_ctffind
 from .mdoc import collect_tilt_series
+from .steplog import StepLog, step_completed
 from .utils import (
     banner,
     ensure_dir,
@@ -319,8 +320,16 @@ def _extra_args(config):
 # ------------------------------------------------------------------ entrypoints
 
 
-def train(config, force_ctf=False, dry_run=False):
+def train(config, force_ctf=False, force=None, dry_run=False):
     """``tomo_denoising train_isonet``"""
+    force = config.overwrite if force is None else force
+    with StepLog(config, "train_isonet", force=force) as log:
+        code = _train(config, log, force_ctf=force_ctf, force=force,
+                      dry_run=dry_run)
+        return code
+
+
+def _train(config, log, force_ctf=False, force=False, dry_run=False):
     banner("IsoNet training")
     require_executable(config.exe("isonet"), "IsoNet")
 
@@ -329,8 +338,21 @@ def train(config, force_ctf=False, dry_run=False):
     logs = ensure_dir(work, "logs")
     ensure_dir(config.isonet_config_dir)
 
+    if not force and step_completed(config, "train_isonet"):
+        try:
+            network = resolve_network(config, "refine_network", "isonet_maps")
+        except SystemExit:
+            network = None
+        if network:
+            info("IsoNet is already trained: %s" % network)
+            log.note("skipped: the previous training completed and %s exists. "
+                     "Use --force to retrain." % network)
+            return 0
+
     series_list = collect_tilt_series(config.mdoc_dir("train"), "train")
     info("%d tilt series selected for IsoNet training" % len(series_list))
+    log.note("training on %d tilt series from %s"
+             % (len(series_list), config.mdoc_dir("train")))
 
     banner("IsoNet 0/5  defocus estimation (CTFFIND4)")
     metadata = gather_metadata(config, series_list, force_ctf=force_ctf,
@@ -374,11 +396,21 @@ def train(config, force_ctf=False, dry_run=False):
 
     info("IsoNet training finished. Networks are in %s"
          % os.path.join(work, "isonet_maps"))
+    log.note("networks: %s" % os.path.join(work, "isonet_maps"))
+    for entry in series_list:
+        log.ok(entry.name)
     return 0
 
 
-def predict(config, force_ctf=False, dry_run=False):
+def predict(config, force_ctf=False, force=None, dry_run=False):
     """``tomo_denoising predict_isonet``"""
+    force = config.overwrite if force is None else force
+    with StepLog(config, "predict_isonet", force=force) as log:
+        return _predict(config, log, force_ctf=force_ctf, force=force,
+                        dry_run=dry_run)
+
+
+def _predict(config, log, force_ctf=False, force=False, dry_run=False):
     banner("IsoNet prediction")
     require_executable(config.exe("isonet"), "IsoNet")
 
@@ -388,21 +420,35 @@ def predict(config, force_ctf=False, dry_run=False):
 
     series_list = collect_tilt_series(config.mdoc_dir("predict"), "predict")
     info("%d tilt series selected for IsoNet prediction" % len(series_list))
+    log.note("predicting %d tilt series from %s"
+             % (len(series_list), config.mdoc_dir("predict")))
 
-    metadata = gather_metadata(config, series_list, force_ctf=force_ctf,
+    if not force and step_completed(config, "predict_isonet"):
+        info("IsoNet prediction already complete.")
+        log.note("skipped: the previous prediction completed. "
+                 "Use --force to redo it.")
+    else:
+        metadata = gather_metadata(config, series_list, force_ctf=force_ctf,
+                                   dry_run=dry_run)
+        star, _ = prepare_star(config, series_list, "predict", metadata,
                                dry_run=dry_run)
-    star, _ = prepare_star(config, series_list, "predict", metadata,
-                           dry_run=dry_run)
 
-    network = (
-        os.path.join(work, "isonet_maps", "network.pt") if dry_run
-        else resolve_network(config, "refine_network", "isonet_maps")
-    )
+        network = (
+            os.path.join(work, "isonet_maps", "network.pt") if dry_run
+            else resolve_network(config, "refine_network", "isonet_maps")
+        )
 
-    run([config.exe("isonet"), "predict", star, network]
-        + _gpu_args(config) + _extra_args(config),
-        cwd=work, log_file=os.path.join(logs, "predict_refine.log"),
-        dry_run=dry_run)
+        run([config.exe("isonet"), "predict", star, network]
+            + _gpu_args(config) + _extra_args(config),
+            cwd=work, log_file=os.path.join(logs, "predict_refine.log"),
+            dry_run=dry_run)
 
     info("IsoNet prediction finished. Output is under %s" % work)
+    log.note("output: %s" % work)
+    for entry in series_list:
+        log.ok(entry.name)
+
+    if not dry_run:
+        from . import report
+        report.refresh_after_prediction(config, "isonet", log=log)
     return 0

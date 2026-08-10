@@ -4,13 +4,35 @@
 #  Edit this file, then run the pipeline steps in order:
 #
 #    tomo_denoising create_halfMaps      # frames -> tomograms + even/odd half maps
+#    tomo_denoising quality_check        # RESOLVE resolution estimate + report
 #    tomo_denoising train_cryoCARE       # cryoCARE training   (mdocs.train set)
 #    tomo_denoising predict_cryoCARE     # cryoCARE denoising  (mdocs.predict set)
 #    tomo_denoising train_isonet         # IsoNet training     (mdocs.train set)
 #    tomo_denoising predict_isonet       # IsoNet denoising    (mdocs.predict set)
 #
+#  Or run the whole thing in one go:
+#
+#    tomo_denoising run_pipe --denoiser cryocare
+#    tomo_denoising run_pipe --denoiser isonet --skip-quality
+#
 #  Every step reads this file. Pass a different one with  -c / --config.
+#  Every step writes a summary to <processing_directory>/logs/.
 # =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Resuming
+# -----------------------------------------------------------------------------
+#  false (default): every step checks what is already finished and only redoes
+#                   what is missing or was interrupted. Tilt series that
+#                   already have their half maps are skipped, a completed
+#                   training is not repeated, and a previously converged tilt
+#                   axis is reused instead of being refined again.
+#  true:            redo everything from scratch, ignoring previous results.
+#
+#  Individual steps also accept --force on the command line, which overrides
+#  this for that one run.
+overwrite: false
 
 
 # -----------------------------------------------------------------------------
@@ -83,6 +105,7 @@ executables:
   cryocare_train:    "cryoCARE_train.py"
   cryocare_predict:  "cryoCARE_predict.py"
   isonet:            "isonet.py"
+  resolve:           "RESOLVE"                     # quality_check
 
 
 # -----------------------------------------------------------------------------
@@ -160,7 +183,6 @@ aretomo:
   vol_z: 1200
 
   # Local (patch) alignment, AreTomo2 syntax. Empty string disables it.
-  # Ignored when tilt_split.enabled is true (see below).
   local_align: "-Patch 4 5"
 
   # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
@@ -170,24 +192,58 @@ aretomo:
   wbp: true                      # weighted back projection (-Wbp 1)
   flip_vol: true                 # -FlipVol 1
 
+  # --- tilt axis refinement -------------------------------------------------
+  # The tilt axis is a property of the microscope, not of one tilt series, so
+  # it is refined once for the whole dataset and then held fixed - the same
+  # idea as WarpTools' tilt axis search.
+  #
+  # Each iteration aligns a random subset of tilt series, and their tilt axis
+  # angles are combined into one robust estimate (see the log). The next
+  # iteration passes that estimate to AreTomo2 as -TiltAxis <angle> 0, which
+  # makes it refine within +/-3 degrees of it. After the last iteration, ALL
+  # tilt series are reconstructed once with -TiltAxis <converged> -1, i.e. the
+  # angle fixed and no further refinement.
+  #
+  # Set to 0 to disable refinement entirely and align every tilt series
+  # independently, as before.
+  tilt_axis_iterations: 3
+
+  # Tilt series per refinement iteration. Datasets with fewer than this are
+  # used in full, and a different random subset is drawn for each iteration.
+  tilt_axis_subset_size: 10
+
+  # Seed for those random subsets, so a resumed run picks the same ones.
+  tilt_axis_seed: 0
+
   # Appended verbatim to every AreTomo2 call.
   extra_args: ""
 
 
 # -----------------------------------------------------------------------------
-#  Half-map generation strategy
+#  Additional tilt-split half maps
+# -----------------------------------------------------------------------------
+#  Frame splitting ALWAYS happens: MotionCor3 splits the frames of every tilt
+#  into an even and an odd sum (-SplitSum 1), and those reconstructions become
+#  <processing_directory>/raw_halfMaps. That is what cryoCARE and IsoNet use.
+#
+#  Tilt splitting is done IN ADDITION and reuses what the frame-split run
+#  already produced - the motion corrected averages and the AreTomo2
+#  alignment. Only the stack, the .rawtlt and the .aln are split by tilt
+#  number, and AreTomo2 runs once more into its own subdirectory. Nothing is
+#  motion corrected or aligned a second time. The result lands in
+#  <processing_directory>/raw_halfMaps_tiltSplit and is what quality_check
+#  measures with RESOLVE.
 # -----------------------------------------------------------------------------
 tilt_split:
 
-  # false (default): MotionCor3 splits the FRAMES of every tilt into an even and
-  #                  an odd sum (-SplitSum 1). Both half stacks contain all tilts.
-  #
-  # true:            MotionCor3 averages all frames, and the aligned tilt SERIES
-  #                  is split instead - even-numbered tilts into one half map,
-  #                  odd-numbered tilts into the other. Use this when the frames
-  #                  are already averaged or too dose-fractionated to split.
-  #                  Local patch alignment is switched off automatically.
-  enabled: false
+  enabled: true
+
+  # Pixel size in Angstrom aimed for in the tilt-split reconstructions. They
+  # only feed the resolution estimate, so they are reconstructed far more
+  # coarsely than the half maps used for denoising. The AreTomo2 binning is
+  # derived from this automatically; binning is an integer so the target will
+  # not be hit exactly, and the pixel size actually reached is reported.
+  target_pixel_size: 50.0
 
 
 # -----------------------------------------------------------------------------
@@ -267,6 +323,45 @@ isonet:
 
   # Appended verbatim to the denoise/refine/predict calls.
   extra_args: ""
+
+
+# -----------------------------------------------------------------------------
+#  RESOLVE quality check   (tomo_denoising quality_check)
+# -----------------------------------------------------------------------------
+#  Runs RESOLVE in batch mode over raw_halfMaps_tiltSplit to estimate a
+#  resolution and a signal ratio per tomogram. Requires tilt_split.enabled.
+#  Everything RESOLVE writes goes to <processing_directory>/resolve.
+#
+#  It also produces the results figure: a multi-page PDF with a central Z, Y
+#  and X slice of every DENOISED tomogram, laid out like 3dmod's XYZ window,
+#  captioned with that tomogram's resolution and signal ratio, sorted best
+#  resolution first, 9 tomograms per page. It is written to the base
+#  processing directory, once per denoiser that has results. The figure is
+#  regenerated both when quality_check runs and when a prediction finishes,
+#  whichever completes second.
+# -----------------------------------------------------------------------------
+quality_check:
+
+  # RESOLVE --fast: skips some shells and increases the step size.
+  fast: true
+
+  gpu_enabled: true
+  cpu_threads: 16
+
+  # Populate the mdocs.train directory automatically from the RESOLVE ranking,
+  # but ONLY when it does not exist or holds no .mdoc files. Existing training
+  # selections are never touched. The mdocs are symlinked from the
+  # mdocs.preprocessing directory.
+  #
+  #   how many are chosen:  < 10 tomograms -> 3,  >= 10 -> 4,  >= 20 -> 5
+  #
+  # Tomograms below min_signal_ratio are never eligible. Of those chosen, any
+  # whose resolution is worse than outlier_factor times the best one is
+  # dropped, even if that leaves only two. If nothing qualifies, the run stops
+  # and says so in the log, so you can pick the training tomograms yourself.
+  choose_training_set: true
+  min_signal_ratio: 0.25
+  outlier_factor: 1.5
 
 
 # -----------------------------------------------------------------------------
