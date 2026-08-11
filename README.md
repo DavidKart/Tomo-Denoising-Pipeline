@@ -31,7 +31,7 @@ right one is reachable when you call the corresponding step.
 | [CTFFIND4](https://grigoriefflab.umassmed.edu/ctffind4) | `*_isonet` | Grigorieff lab |
 | [RESOLVE](https://github.com/DavidKart/RESOLVE) | `quality_check` | DavidKart |
 | [cryoCARE](https://github.com/juglab/cryoCARE_pip) | `*_cryoCARE` | juglab |
-| [IsoNet](https://github.com/IsoNet-cryoET/IsoNet) | `*_isonet` | IsoNet-cryoET |
+| [IsoNet](https://github.com/IsoNet-cryoET/IsoNet2) | `*_isonet` | IsoNet-cryoET |
 
 ---
 
@@ -249,3 +249,4 @@ CTFFIND4 estimate.
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
+
