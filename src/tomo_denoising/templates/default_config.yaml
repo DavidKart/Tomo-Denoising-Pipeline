@@ -43,7 +43,7 @@ paths:
   # Directory holding the RAW movie frames (.tif / .tiff / .mrc / .eer) and the
   # gain reference. This directory is only ever READ FROM - nothing is written
   # here. The file names are taken from the SubFramePath entries of the mdocs.
-  input_frames: "/path/to/raw/frames"
+  input_frames: "frames"
 
   # Directory where ALL processing happens and all results are written.
   # Created if it does not exist. Everything below is created inside it:
@@ -59,16 +59,14 @@ paths:
   #
   # The mdoc directories are NOT part of this layout - see the 'mdocs'
   # section below; they are separate locations and may live anywhere.
-  processing_directory: "/path/to/processing"
+  processing_directory: "processing"
 
 
 # -----------------------------------------------------------------------------
 #  Which tomograms are used for which task
 # -----------------------------------------------------------------------------
 #  These are DIRECTORIES holding .mdoc files. They are independent locations
-#  and may live anywhere - they are NOT interpreted relative to
-#  processing_directory. An absolute path is used as given; a relative one is
-#  resolved against the directory you run tomo_denoising from.
+#  and may live anywhere. 
 #
 #  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
 #  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
@@ -77,23 +75,23 @@ paths:
 mdocs:
 
   # Tilt series to reconstruct in  create_halfMaps.
-  preprocessing: "/path/to/mdocs"
+  preprocessing: "mdocs"
 
   # Tilt series used to TRAIN cryoCARE / IsoNet.
   # A small representative subset (3-5 tomograms) is normally plenty.
-  train: "/path/to/mdocsTrain"
+  # If there is no knowledge about well-suited tilt-series, this directory
+  # be auto-filled by estimation of tomogram quality with RESOLVE.
+  # Auto fill only applies when the directory is empty or non-existent.
+  train: "mdocsTrain"
 
   # Tilt series to denoise in  predict_cryoCARE / predict_isonet.
-  predict: "/path/to/mdocs"
+  predict: "mdocs"
 
 
 # -----------------------------------------------------------------------------
 #  External programs
 # -----------------------------------------------------------------------------
 #  Either a bare name (looked up on PATH) or an absolute path to the binary.
-#  NOTE: cryoCARE and IsoNet usually live in their own conda environments -
-#  activate the right environment before calling the corresponding step, or
-#  give the absolute path to the executable inside that environment here.
 # -----------------------------------------------------------------------------
 executables:
   motioncor:         "MotionCor3"
@@ -131,9 +129,6 @@ acquisition:
 
   # Gain reference. Must be .mrc
   # (convert a .dm4 with:  dm2mrc input_ref.dm4 output_ref.mrc).
-  # A path in its own right: absolute is used as given, relative is resolved
-  # against the directory you run tomo_denoising from. It is NOT looked up
-  # inside paths.input_frames.
   # Leave empty if the frames are already gain corrected.
   gain: ""
 
@@ -160,8 +155,6 @@ motioncor:
   tolerance: 0.5
 
   # Only used when acquisition.frame_extension is "eer".
-  # fm_int_file is resolved like the gain reference: absolute as given,
-  # relative against the directory you run tomo_denoising from.
   # Leave it empty to omit -FmIntFile entirely.
   eer_sampling: 1
   fm_int_file: ""
@@ -178,34 +171,26 @@ aretomo:
   # Binning applied on top of motioncor.binning.
   binning: 4
 
-  # Reconstruction thickness in BINNED pixels (AreTomo2 -VolZ).
-  # Increase for thick lamellae, decrease to save memory/time.
+  # Reconstruction thickness in pixels (before AreTomo binning!) (AreTomo2 -VolZ).
   vol_z: 1200
 
   # Local (patch) alignment, AreTomo2 syntax. Empty string disables it.
-  local_align: "-Patch 4 5"
+  local_align: ""
 
   # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
-  tilt_axis_correction: true
+  tilt_axis_correction: false
 
   dark_tolerance: 0.5
   wbp: true                      # weighted back projection (-Wbp 1)
-  flip_vol: true                 # -FlipVol 1
+
 
   # --- tilt axis refinement -------------------------------------------------
-  # The tilt axis is a property of the microscope, not of one tilt series, so
-  # it is refined once for the whole dataset and then held fixed - the same
-  # idea as WarpTools' tilt axis search.
-  #
+  # The tilt axis is refined once for the whole dataset and then held fixed.
   # Each iteration aligns a random subset of tilt series, and their tilt axis
-  # angles are combined into one robust estimate (see the log). The next
-  # iteration passes that estimate to AreTomo2 as -TiltAxis <angle> 0, which
-  # makes it refine within +/-3 degrees of it. After the last iteration, ALL
-  # tilt series are reconstructed once with -TiltAxis <converged> -1, i.e. the
-  # angle fixed and no further refinement.
+  # angles are combined into one robust estimate (see the log).
   #
   # Set to 0 to disable refinement entirely and align every tilt series
-  # independently, as before.
+  # independently.
   tilt_axis_iterations: 3
 
   # Tilt series per refinement iteration. Datasets with fewer than this are
@@ -222,27 +207,20 @@ aretomo:
 # -----------------------------------------------------------------------------
 #  Additional tilt-split half maps
 # -----------------------------------------------------------------------------
-#  Frame splitting ALWAYS happens: MotionCor3 splits the frames of every tilt
-#  into an even and an odd sum (-SplitSum 1), and those reconstructions become
+#  Frame splitting ALWAYS happens: reconstructions become
 #  <processing_directory>/raw_halfMaps. That is what cryoCARE and IsoNet use.
 #
 #  Tilt splitting is done IN ADDITION and reuses what the frame-split run
-#  already produced - the motion corrected averages and the AreTomo2
-#  alignment. Only the stack, the .rawtlt and the .aln are split by tilt
-#  number, and AreTomo2 runs once more into its own subdirectory. Nothing is
-#  motion corrected or aligned a second time. The result lands in
-#  <processing_directory>/raw_halfMaps_tiltSplit and is what quality_check
+#  already produced. Only the stack, the .rawtlt and the .aln are split by tilt
+#  number, and AreTomo2 runs once more into its own subdirectory. The result 
+#  lands in <processing_directory>/raw_halfMaps_tiltSplit and is what quality_check
 #  measures with RESOLVE.
 # -----------------------------------------------------------------------------
 tilt_split:
 
   enabled: true
 
-  # Pixel size in Angstrom aimed for in the tilt-split reconstructions. They
-  # only feed the resolution estimate, so they are reconstructed far more
-  # coarsely than the half maps used for denoising. The AreTomo2 binning is
-  # derived from this automatically; binning is an integer so the target will
-  # not be hit exactly, and the pixel size actually reached is reported.
+  # Pixel size in Angstrom aimed for in the tilt-split reconstructions. 
   target_pixel_size: 50.0
 
 
@@ -276,10 +254,6 @@ cryocare:
   # Increase if prediction runs out of GPU memory, e.g. [16, 16, 16].
   n_tiles: [8, 8, 8]
 
-  # cryoCARE refuses to write into an output directory that already exists
-  # unless this is true, which would make every re-run abort - and only after
-  # the normalization pass has already finished. Set false to be warned
-  # instead of silently regenerating existing training data.
   overwrite: true
 
 
@@ -309,11 +283,6 @@ isonet:
   # Empty (default) = read per tomogram from rec_<tomo>/<tomo>.rawtlt.
   # prepare_star only accepts ONE range for the whole set, so if the tomograms
   # disagree the WIDEST range is used and the outliers are named in a warning.
-  # That direction is deliberate: declaring a range wider than a tomogram
-  # really has only leaves it under-corrected, whereas declaring a narrower
-  # one makes IsoNet synthesise over data that was actually measured.
-  # Set an explicit range to override, e.g.  tilt_range: [-60, 60]
-  tilt_range: []
 
   # Trained networks to use. "auto" picks the most recent network_*.pt from
   # the corresponding IsoNet output directory. Set an explicit file name
@@ -332,13 +301,9 @@ isonet:
 #  resolution and a signal ratio per tomogram. Requires tilt_split.enabled.
 #  Everything RESOLVE writes goes to <processing_directory>/resolve.
 #
-#  It also produces the results figure: a multi-page PDF with a central Z, Y
-#  and X slice of every DENOISED tomogram, laid out like 3dmod's XYZ window,
-#  captioned with that tomogram's resolution and signal ratio, sorted best
-#  resolution first, 9 tomograms per page. It is written to the base
-#  processing directory, once per denoiser that has results. The figure is
-#  regenerated both when quality_check runs and when a prediction finishes,
-#  whichever completes second.
+#  It also produces the results figure, a multi-page PDF with a central Z, Y
+#  and X slice of every DENOISED tomogram, sorted best
+#  resolution first, 9 tomograms per page. 
 # -----------------------------------------------------------------------------
 quality_check:
 
@@ -350,17 +315,9 @@ quality_check:
 
   # Populate the mdocs.train directory automatically from the RESOLVE ranking,
   # but ONLY when it does not exist or holds no .mdoc files. Existing training
-  # selections are never touched. The mdocs are symlinked from the
-  # mdocs.preprocessing directory.
-  #
-  #   how many are chosen:  < 10 tomograms -> 3,  >= 10 -> 4,  >= 20 -> 5
-  #
-  # Tomograms below min_signal_ratio are never eligible. Of those chosen, any
-  # whose resolution is worse than outlier_factor times the best one is
-  # dropped, even if that leaves only two. If nothing qualifies, the run stops
-  # and says so in the log, so you can pick the training tomograms yourself.
+  # selections are never touched. 
   choose_training_set: true
-  min_signal_ratio: 0.25
+  min_signal_ratio: 0.35
   outlier_factor: 1.5
 
 

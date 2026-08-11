@@ -63,7 +63,6 @@ DEFAULTS = {
         "tilt_axis_correction": True,
         "dark_tolerance": 0.5,
         "wbp": True,
-        "flip_vol": True,
         "tilt_axis_iterations": 3,
         "tilt_axis_subset_size": 10,
         "tilt_axis_seed": 0,

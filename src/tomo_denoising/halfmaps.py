@@ -257,8 +257,10 @@ def _aretomo_common(config, apix_binned, vol_z=None, binning=None):
         command += ["-PixSize", "%.4f" % apix_binned]
     if aretomo["wbp"]:
         command += ["-Wbp", "1"]
-    if aretomo["flip_vol"]:
-        command += ["-FlipVol", "1"]
+    # Always flip the reconstructed volume (-FlipVol 1), full map included:
+    # someone may want to open that full reconstruction directly to inspect
+    # it, and an unflipped one would be inconsistent with the half maps.
+    command += ["-FlipVol", "1"]
     local = str(aretomo["local_align"]).strip()
     if local:
         command += local.split()

@@ -7,6 +7,13 @@ dist/
 .venv/
 venv/
 
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
+
 # pipeline products
 tomo_denoising_config.yaml
 rec_*/
