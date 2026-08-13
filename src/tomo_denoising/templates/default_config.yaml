@@ -266,7 +266,7 @@ isonet:
   denoise_epochs: 50
 
   # Epochs for the missing-wedge refinement (step 'refine').
-  refine_epochs: 100
+  refine_epochs: 50
 
   # CTF handling mode passed to denoise/refine.
   ctf_mode: "network"
