@@ -16,6 +16,7 @@ prediction set.
 
 import glob
 import os
+import re
 
 from .ctffind import run_ctffind
 from .mdoc import collect_tilt_series
@@ -137,21 +138,30 @@ def resolve_tilt_range(config, usable, metadata):
 
     The first is recoverable, the second destroys information, so the union
     is the safe default. Outliers are reported by name so the mismatch is
-    never silent. ``isonet.tilt_range`` overrides the whole calculation.
+    never silent.
+
+    This is only what ``prepare_star`` is called with - ``prepare_star``
+    afterwards corrects ``tomograms.star`` back to a per-tomogram range read
+    from each tomogram's own .aln (see ``_edit_star_tilt_range``), UNLESS
+    ``isonet.fix_tilt_range`` overrides the whole calculation, in which case
+    the fixed range returned here is what ends up in the star file too.
+
+    Returns ``(tilt_min, tilt_max, is_override)``.
     """
-    override = config["isonet"].get("tilt_range")
+    override = config["isonet"].get("fix_tilt_range")
     if override:
         low, high = float(override[0]), float(override[1])
-        info("isonet.tilt_range override: %.1f to %.1f deg" % (low, high))
-        return low, high
+        info("isonet.fix_tilt_range override: %.1f to %.1f deg "
+             "(used for every tomogram, unedited)" % (low, high))
+        return low, high, True
 
     ranges = {s.name: (metadata[s.name]["tilt_min"], metadata[s.name]["tilt_max"])
               for s in usable
               if metadata[s.name]["tilt_min"] is not None}
     if not ranges:
         warn("no .rawtlt files found - falling back to -60 to 60 deg. "
-             "Set isonet.tilt_range in your configuration.")
-        return -60.0, 60.0
+             "Set isonet.fix_tilt_range in your configuration.")
+        return -60.0, 60.0, False
 
     minima = [low for low, _ in ranges.values()]
     maxima = [high for _, high in ranges.values()]
@@ -162,7 +172,7 @@ def resolve_tilt_range(config, usable, metadata):
     if spread_low <= TILT_TOLERANCE and spread_high <= TILT_TOLERANCE:
         info("tilt range %.1f to %.1f deg (consistent across %d tomograms)"
              % (tilt_min, tilt_max, len(ranges)))
-        return tilt_min, tilt_max
+        return tilt_min, tilt_max, False
 
     warn("tilt ranges differ across %d tomograms:" % len(ranges))
     outliers = []
@@ -176,15 +186,102 @@ def resolve_tilt_range(config, usable, metadata):
                  % (name, low, high, narrower_low, narrower_high))
         else:
             warn("    %-24s %6.1f to %6.1f" % (name, low, high))
-    warn("Using the widest range: %.1f to %.1f deg." % (tilt_min, tilt_max))
-    warn("%s will be under-corrected, because IsoNet will assume tilt data "
-         "they do not have. That is the safe direction - declaring a narrower "
-         "range would make IsoNet synthesise over real data instead."
-         % ", ".join(outliers))
-    warn("To avoid it, process those tomograms in a separate run, or set an "
-         "explicit range:  isonet.tilt_range: [%.0f, %.0f]"
-         % (max(minima), min(maxima)))
-    return tilt_min, tilt_max
+    warn("Using the widest range for prepare_star: %.1f to %.1f deg."
+         % (tilt_min, tilt_max))
+    warn("%s would be under-corrected by that range alone, because IsoNet "
+         "would assume tilt data they do not have - but tomograms.star gets "
+         "each tomogram's own range from its .aln right after, so this only "
+         "matters for the call to prepare_star itself." % ", ".join(outliers))
+    return tilt_min, tilt_max, False
+
+
+# --------------------------------------------------------- per-tomogram .aln
+
+
+def _aln_tilt_range(config, tomo_name):
+    """Actual min/max of the TILT column in ``rec_<tomo>/aretomo_full/*.aln``.
+
+    This is the ground truth for what AreTomo2 actually used: dark tilts it
+    dropped are not in this file at all, and if ``aretomo.tilt_axis_correction``
+    is on, TILT holds the corrected angle rather than the nominal one from the
+    .rawtlt. TILT is always the last column of a data row, so it is read
+    positionally from the end rather than by counting columns from the start.
+    """
+    search_dir = os.path.join(config.rec_dir(tomo_name), "aretomo_full")
+    candidates = sorted(glob.glob(os.path.join(search_dir, "*.aln")))
+    if not candidates:
+        return None
+    preferred = os.path.join(search_dir, tomo_name + "_stacked.aln")
+    aln_path = preferred if preferred in candidates else candidates[0]
+
+    angles = []
+    with open(aln_path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            try:
+                angles.append(float(parts[-1]))
+            except (ValueError, IndexError):
+                continue
+    if not angles:
+        return None
+    return min(angles), max(angles)
+
+
+_STAR_COLUMN_RE = re.compile(r"^_(\S+)\s+#(\d+)")
+
+
+def _edit_star_tilt_range(config, star_path, usable):
+    """Replace the dataset-wide TiltMin/TiltMax in *star_path* with each
+    tomogram's own range, read from its .aln (see ``_aln_tilt_range``).
+
+    ``prepare_star`` writes the same ``--tilt_min``/``--tilt_max`` on every
+    row (``resolve_tilt_range`` had to pick one value for the whole call), so
+    this is what makes the star file per-tomogram again. Rows are matched to
+    tomograms positionally, in the same order ``usable`` was handed to
+    ``prepare_star`` (sorted by name) - the star file has no other way to
+    identify which row is which tomogram, since ``rlnTomoName`` is "None".
+    """
+    with open(star_path, encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+
+    columns = {}
+    header_end = None
+    for index, line in enumerate(lines):
+        match = _STAR_COLUMN_RE.match(line.strip())
+        if match:
+            columns[match.group(1)] = int(match.group(2)) - 1
+            header_end = index
+
+    if header_end is None or "rlnTiltMin" not in columns or "rlnTiltMax" not in columns:
+        warn("%s has no rlnTiltMin/rlnTiltMax column - per-tomogram tilt "
+             "ranges were not applied." % star_path)
+        return
+    min_col, max_col = columns["rlnTiltMin"], columns["rlnTiltMax"]
+
+    data_rows = [index for index in range(header_end + 1, len(lines))
+                 if lines[index].strip()]
+    if len(data_rows) != len(usable):
+        warn("%s has %d rows but %d tomograms were prepared - per-tomogram "
+             "tilt ranges were not applied." % (star_path, len(data_rows), len(usable)))
+        return
+
+    for row_index, series in zip(data_rows, usable):
+        aln_range = _aln_tilt_range(config, series.name)
+        if aln_range is None:
+            warn("no .aln tilt range for %s - that row keeps the "
+                 "dataset-wide range prepare_star wrote." % series.name)
+            continue
+        fields = lines[row_index].split()
+        fields[min_col] = "%.6f" % aln_range[0]
+        fields[max_col] = "%.6f" % aln_range[1]
+        lines[row_index] = "\t".join(fields) + "\n"
+
+    with open(star_path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    info("tomograms.star: per-tomogram tilt ranges applied from each .aln")
 
 
 def _half_map_pixel_size(config, series):
@@ -208,10 +305,14 @@ def prepare_star(config, series_list, subset, metadata, dry_run=False):
     linked half maps (sorted by tomogram name), so every tomogram gets the
     defocus CTFFIND4 measured on its own first tilt. ``--tilt_min`` and
     ``--tilt_max`` take a single value each, so the overall range across the
-    selected tomograms is used; the per-tomogram ranges are logged.
+    selected tomograms is used for that call; the per-tomogram ranges are
+    logged.
 
-    The star file IsoNet writes is used exactly as produced - nothing rewrites
-    it afterwards.
+    Once IsoNet has written ``tomograms.star``, ``rlnTiltMin``/``rlnTiltMax``
+    on each row are corrected back to that tomogram's own range, read from its
+    AreTomo2 .aln (see ``_edit_star_tilt_range``) - unless
+    ``isonet.fix_tilt_range`` is set, in which case the fixed range is left as
+    IsoNet wrote it on every row.
     """
     # A tomogram without a defocus would shift every later entry of the
     # --defocus list onto the wrong tomogram, so drop it from the run.
@@ -244,7 +345,7 @@ def prepare_star(config, series_list, subset, metadata, dry_run=False):
         info("    %-24s defocus %9.1f A   tilt %s"
              % (series.name, entry["defocus"], tilts))
 
-    tilt_min, tilt_max = resolve_tilt_range(config, usable, metadata)
+    tilt_min, tilt_max, fixed_tilt_range = resolve_tilt_range(config, usable, metadata)
 
     defocus_list = "[%s]" % ",".join("%.2f" % value for value in defoci)
 
@@ -275,6 +376,13 @@ def prepare_star(config, series_list, subset, metadata, dry_run=False):
                             "prepare_star_%s.log" % subset))
         )
     info("star file: %s" % produced[0])
+
+    if fixed_tilt_range:
+        info("isonet.fix_tilt_range is set - tomograms.star keeps that fixed "
+             "range on every row.")
+    else:
+        _edit_star_tilt_range(config, produced[0], usable)
+
     return produced[0], usable
 
 

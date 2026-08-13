@@ -105,7 +105,7 @@ DEFAULTS = {
         "std_percentage": 80,
         "mw_weight": 200,
         "bfactor": 0,
-        "tilt_range": [],
+        "fix_tilt_range": [],
         "denoise_network": "auto",
         "refine_network": "auto",
         "extra_args": "",

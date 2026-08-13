@@ -12,8 +12,8 @@ One panel group per denoised tomogram, laid out like 3dmod's XYZ window:
 
 Slices are drawn with the origin at the bottom left and Y increasing upwards,
 which is how 3dmod displays them. Panels are captioned with the RESOLVE
-resolution and signal ratio and sorted best resolution first, nine tomograms
-per page.
+resolution and signal ratio and sorted best resolution first, eight tomograms
+per page (4 columns x 2 rows).
 
 The figure is rebuilt whenever both halves exist - after quality_check when a
 denoising result is already there, and after a prediction step when RESOLVE
@@ -40,9 +40,23 @@ DENOISER_OUTPUTS = {
 
 TOMOGRAM_EXTENSIONS = (".mrc", ".rec", ".map")
 
-ROWS_PER_PAGE = 3
-COLUMNS_PER_PAGE = 3
+ROWS_PER_PAGE = 2
+COLUMNS_PER_PAGE = 4
 PER_PAGE = ROWS_PER_PAGE * COLUMNS_PER_PAGE
+
+#: Resolution the images inside the PDF are rasterised at. The vector PDF
+#: backend otherwise falls back to matplotlib's default figure dpi (100),
+#: which is soft enough to look noticeably blurry once printed or zoomed in.
+FIGURE_DPI = 300
+
+#: Gutter between the XY/XZ/ZY panes, as a fraction of the largest of the
+#: three slice dimensions. A fixed pixel count (the previous approach) looks
+#: fine for a small tomogram and vanishes entirely for a large one, because
+#: the same handful of array pixels covers a shrinking fraction of the panel
+#: as the array grows - a proportional gutter keeps the visible gap the same
+#: size on the page regardless of the tomogram's resolution.
+GUTTER_FRACTION = 0.012
+MIN_GUTTER = 3
 
 
 def report_path(config, denoiser):
@@ -124,7 +138,7 @@ def _contrast(image):
 # --------------------------------------------------------------------- drawing
 
 
-def compose_xyz(xy, xz, zy, gutter=4):
+def compose_xyz(xy, xz, zy, gutter):
     """Lay the three planes out on one canvas, 3dmod XYZ style.
 
     Compositing into a single image rather than three subplots is what keeps
@@ -132,7 +146,10 @@ def compose_xyz(xy, xz, zy, gutter=4):
     separate axes each letterbox their image independently and drift apart.
 
     The canvas is meant to be drawn with ``origin="lower"``, so row 0 is the
-    bottom. Gutters are NaN and render as the axes background.
+    bottom. Gutters are NaN and render as the axes background. *gutter* is in
+    array pixels - callers scale it to the tomogram's own resolution (see
+    ``GUTTER_FRACTION``) so the gap reads the same size on the page no matter
+    how large the tomogram is.
     """
     ny, nx = xy.shape
     nz = xz.shape[0]
@@ -163,23 +180,36 @@ def _draw_tomogram(figure, cell, path, measurement, name):
                   ha="center", va="center", fontsize=6)
         return
 
-    canvas = compose_xyz(xy, xz, zy)
+    ny, nx = xy.shape
+    nz = xz.shape[0]
+    gutter = max(MIN_GUTTER, int(round(GUTTER_FRACTION * max(nx, ny, nz))))
+
+    canvas = compose_xyz(xy, xz, zy, gutter=gutter)
     low, high = _contrast(xy)
 
     colours = plt_colormap()
     axis.imshow(canvas, cmap=colours, vmin=low, vmax=high, origin="lower",
                 interpolation="nearest", aspect="equal")
 
-    ny, nx = xy.shape
-    nz = xz.shape[0]
     height, width = canvas.shape
     for label, (x, y) in (("XY", (2, ny - 2)),
                           ("XZ", (2, height - 2)),
-                          ("ZY", (nx + 6, ny - 2))):
+                          ("ZY", (nx + gutter + 2, ny - 2))):
         axis.text(x, y, label, fontsize=5, color="yellow",
                   ha="left", va="top")
     axis.set_xlim(-0.5, width - 0.5)
     axis.set_ylim(-0.5, height - 0.5)
+
+    # A thin border around each of the three panes individually - drawn last
+    # so it sits on top of the image.
+    from matplotlib.patches import Rectangle
+    for x0, y0, w, h in (
+        (0, 0, nx, ny),                              # XY
+        (0, ny + gutter, nx, nz),                    # XZ
+        (nx + gutter, 0, nz, ny),                    # ZY
+    ):
+        axis.add_patch(Rectangle((x0 - 0.5, y0 - 0.5), w, h, fill=False,
+                                 edgecolor="black", linewidth=0.6))
 
     if measurement is not None:
         caption = "%s\n%.1f A   signal %.2f" % (
@@ -226,7 +256,8 @@ def build_report(config, denoiser, volumes, measurements, log=None):
     with PdfPages(path) as pdf:
         for page in range(pages):
             chunk = names[page * PER_PAGE:(page + 1) * PER_PAGE]
-            figure = plt.figure(figsize=(11.69, 8.27))     # A4 landscape
+            figure = plt.figure(figsize=(11.69, 8.27),      # A4 landscape
+                               dpi=FIGURE_DPI)
             figure.suptitle(
                 "%s - denoised tomograms, best resolution first  "
                 "(page %d of %d)" % (denoiser, page + 1, pages),
@@ -240,7 +271,7 @@ def build_report(config, denoiser, volumes, measurements, log=None):
                             index % COLUMNS_PER_PAGE]
                 _draw_tomogram(figure, cell, volumes[name],
                                measurements.get(name), name)
-            pdf.savefig(figure)
+            pdf.savefig(figure, dpi=FIGURE_DPI)
             plt.close(figure)
 
     if log is not None:

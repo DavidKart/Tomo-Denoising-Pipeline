@@ -57,16 +57,14 @@ paths:
   #     isonet_config/    <- ctffind results + the star files
   #     isonet/           <- IsoNet working directory (networks, masks, output)
   #
-  # The mdoc directories are NOT part of this layout - see the 'mdocs'
-  # section below; they are separate locations and may live anywhere.
+  # The mdoc directories and frame directory may live anywhere.
   processing_directory: "processing"
 
 
 # -----------------------------------------------------------------------------
 #  Which tomograms are used for which task
 # -----------------------------------------------------------------------------
-#  These are DIRECTORIES holding .mdoc files. They are independent locations
-#  and may live anywhere. 
+#  These are DIRECTORIES holding .mdoc files.
 #
 #  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
 #  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
@@ -79,8 +77,8 @@ mdocs:
 
   # Tilt series used to TRAIN cryoCARE / IsoNet.
   # A small representative subset (3-5 tomograms) is normally plenty.
-  # If there is no knowledge about well-suited tilt-series, this directory
-  # be auto-filled by estimation of tomogram quality with RESOLVE.
+  # If there is no knowledge about well-suited tilt-series, this directory 
+  # can be auto-filled by estimation of tomogram quality with RESOLVE.
   # Auto fill only applies when the directory is empty or non-existent.
   train: "mdocsTrain"
 
@@ -122,6 +120,7 @@ acquisition:
   # Unbinned pixel size of the RAW frames, in Angstrom.
   # "read" -> taken from the mdoc (PixelSpacing), falling back to IMOD 'header'
   #           on the first raw frame. Set a number here if that is wrong.
+  # as this is often wrong, please input the correct pixel size here!
   pixel_size: "read"
 
   # Extension of the raw frames: tif, tiff, mrc or eer.
@@ -178,7 +177,7 @@ aretomo:
   local_align: ""
 
   # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
-  tilt_axis_correction: false
+  tilt_axis_correction: true
 
   dark_tolerance: 0.5
   wbp: true                      # weighted back projection (-Wbp 1)
@@ -279,11 +278,16 @@ isonet:
   mw_weight: 200
   bfactor: 0
 
-  # Tilt range for the missing-wedge model, in degrees.
-  # Empty (default) = read per tomogram from rec_<tomo>/<tomo>.rawtlt.
-  # prepare_star only accepts ONE range for the whole set, so if the tomograms
-  # disagree the WIDEST range is used and the outliers are named in a warning.
-
+  # Fixed tilt range for the missing-wedge model, in degrees, e.g. [-60, 60].
+  # NOT RECOMMENDED to fill this in. Empty (default) = tomograms.star gets a
+  # per-tomogram range read from each tomogram's own AreTomo2 .aln, which is
+  # the accurate value (it reflects dropped dark tilts and, if
+  # aretomo.tilt_axis_correction is on, the corrected tilt angles too).
+  # If set, this ONE range is used for every tomogram instead and left
+  # unedited in tomograms.star - only do this if you know it applies to all
+  # of them, e.g. all tomograms share an identical, uncorrected tilt scheme.
+  fix_tilt_range: []
+  
   # Trained networks to use. "auto" picks the most recent network_*.pt from
   # the corresponding IsoNet output directory. Set an explicit file name
   # (relative to <processing_directory>/isonet) to pin a specific network.
@@ -303,7 +307,7 @@ isonet:
 #
 #  It also produces the results figure, a multi-page PDF with a central Z, Y
 #  and X slice of every DENOISED tomogram, sorted best
-#  resolution first, 9 tomograms per page. 
+#  resolution first.
 # -----------------------------------------------------------------------------
 quality_check:
 
