@@ -212,7 +212,7 @@ def _draw_tomogram(figure, cell, path, measurement, name):
                                  edgecolor="black", linewidth=0.6))
 
     if measurement is not None:
-        caption = "%s\n%.1f A   signal %.2f" % (
+        caption = "%s\nResolution: %.1f Å   Signal ratio: %.2f" % (
             name, measurement.resolution, measurement.signal_ratio)
     else:
         caption = "%s\n(not measured)" % name
