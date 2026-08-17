@@ -47,7 +47,7 @@ PER_PAGE = ROWS_PER_PAGE * COLUMNS_PER_PAGE
 #: Resolution the images inside the PDF are rasterised at. The vector PDF
 #: backend otherwise falls back to matplotlib's default figure dpi (100),
 #: which is soft enough to look noticeably blurry once printed or zoomed in.
-FIGURE_DPI = 300
+FIGURE_DPI = 500
 
 #: Gutter between the XY/XZ/ZY panes, as a fraction of the largest of the
 #: three slice dimensions. A fixed pixel count (the previous approach) looks
