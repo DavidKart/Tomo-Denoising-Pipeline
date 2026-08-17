@@ -179,7 +179,7 @@ aretomo:
   # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
   tilt_axis_correction: true
 
-  dark_tolerance: 0.5
+  dark_tolerance: 0.1
   wbp: true                      # weighted back projection (-Wbp 1)
 
 
