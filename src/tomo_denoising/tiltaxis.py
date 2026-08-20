@@ -318,7 +318,7 @@ def read_converged_angle(config):
         return None
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            match = re.search(r"CONVERGED TILT AXIS:\s*(-?\d+\.?\d*)", line)
+            match = re.search(r"CONVERGED TILT AXIS:\s*([+-]?\d+\.?\d*)", line)
             if match:
                 return float(match.group(1))
     return None

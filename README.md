@@ -111,6 +111,8 @@ one shared directory:
     motioncor/                *_averaged.mrc (+ _EVN/_ODD when splitting frames)
     stacks/                   full and half tilt series stacks, .aln
     aretomo_full/             TS_01_rec_tomo.mrc  (the full-dose tomogram)
+    aretomo_tiltaxis/         throwaway alignment-only runs from the tilt
+                                axis search below - never a reconstruction
     aretomo_even/             even_TS_01_rec_tomo.mrc + _projXY/_projXZ
     aretomo_odd/              odd_TS_01_rec_tomo.mrc  + _projXY/_projXZ
     logs/                     one log per program call
@@ -222,6 +224,20 @@ tomo_denoising predict_isonet      # uses mdocs.predict
 | 5 | `refine` | `isonet.refine_epochs`, default 100 |
 
 `predict_isonet` is step 6: apply the refined network to the prediction set.
+
+Every step is given an explicit `--output_dir` (and `--output_prefix` for the
+two `predict` calls), so nothing is left to isonet.py's own defaults:
+
+```
+<processing_directory>/isonet/
+  denoise/                  noise2noise networks              (step 2)
+  predict_denoise_only/     denoise_*.mrc - intermediate, feeds make_mask
+                             ONLY, never the deliverable
+  mask/                     masks from the denoised volumes    (step 4)
+  isonet_maps/              missing-wedge networks             (step 5)
+  corrected_tomos_final/    final_*.mrc <- THE deliverable: denoised AND
+                             missing-wedge corrected (step 6, predict_isonet)
+```
 
 **Defocus.** IsoNet needs a defocus per tomogram. CTFFIND4 is run on the
 motion-corrected average of the **first collected tilt** of each series — the

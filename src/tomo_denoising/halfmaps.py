@@ -12,6 +12,14 @@ MotionCor3 -> IMOD newstack -> AreTomo2, in four stages:
 
 Everything a tilt series produces lives in ``rec_<tomoName>``; the half maps
 are symlinked into the two shared directories. Nothing is moved or deleted.
+
+Resuming (``overwrite: false``, the default) is layered to match: a missing
+converged tilt axis means stages 3 and 4 are redone for EVERY tilt series,
+since they all depend on it, while a known tilt axis makes stages 3 and 4
+resume per tomogram and per half from whatever ``rec_<tomoName>/aretomo_*``
+already holds - see ``full_reconstruction_present``, ``frame_half_maps_present``
+and ``tilt_half_maps_present``. Either way, a final pass fills in any shared
+directory symlink still missing for a reconstruction that already exists.
 """
 
 import glob
@@ -48,6 +56,9 @@ class TomoDirs(object):
         self.aretomo_full = ensure_dir(self.root, "aretomo_full")
         self.aretomo_even = ensure_dir(self.root, "aretomo_even")
         self.aretomo_odd = ensure_dir(self.root, "aretomo_odd")
+        # Throwaway alignment-only runs from the tilt axis search (stage 2)
+        # land here, never in aretomo_full - see align_full()'s output_dir.
+        self.aretomo_tiltaxis = ensure_dir(self.root, "aretomo_tiltaxis")
         self.logs = ensure_dir(self.root, "logs")
 
     def tiltsplit(self, half):
@@ -301,9 +312,18 @@ def find_aln(stack_path, *search_dirs):
 
 def align_full(config, dirs, stack, rawtlt, tomo_name, apix_binned,
                tilt_axis=None, refine=-1, vol_z=None, log_suffix="full",
-               dry_run=False):
-    """Reconstruct (or, with vol_z 0, only align) the full tilt series."""
-    output = os.path.join(dirs.aretomo_full, tomo_name + "_rec_tomo.mrc")
+               output_dir=None, dry_run=False):
+    """Reconstruct (or, with vol_z 0, only align) the full tilt series.
+
+    *output_dir* defaults to ``dirs.aretomo_full``, the final reconstruction's
+    home. Callers that only align (``vol_z=0`` - the tilt axis search) MUST
+    pass a different directory: with ``-VolZ 0`` AreTomo2 does not reconstruct
+    anything, it writes the aligned tilt STACK to -OutMrc instead. Landing
+    that under the same name the real reconstruction uses would make the
+    resume logic mistake the stack for a finished reconstruction and skip it.
+    """
+    output_dir = output_dir or dirs.aretomo_full
+    output = os.path.join(output_dir, tomo_name + "_rec_tomo.mrc")
     command = [config.exe("aretomo"),
                "-InMrc", stack,
                "-OutMrc", output,
@@ -315,7 +335,7 @@ def align_full(config, dirs, stack, rawtlt, tomo_name, apix_binned,
 
     log_file = os.path.join(dirs.logs, "%s_aretomo_%s.log"
                             % (tomo_name, log_suffix))
-    run(command, cwd=dirs.aretomo_full, log_file=log_file,
+    run(command, cwd=output_dir, log_file=log_file,
         check=False, dry_run=dry_run)
     return output, log_file
 
@@ -496,6 +516,80 @@ def half_maps_present(config, tomo_name, tilt_split=False):
                for p in half_map_targets(config, tomo_name, tilt_split))
 
 
+# ---------------------------------------------- resuming: per-tomogram outputs
+#
+# ``half_maps_present`` above looks at the SHARED raw_halfMaps directories -
+# cheap, and a reliable "this tomogram needs nothing at all" fast path, since
+# a symlink only ever appears there once AreTomo2 has actually produced the
+# file it points at. But the reverse is not true: a missing symlink does not
+# mean the reconstruction is missing too - a run can be interrupted after
+# AreTomo2 finishes and before the file is linked in. The checks below look
+# directly in rec_<tomo>/aretomo_* - the source of truth - so that case is
+# recognised as "just needs linking" rather than "needs AreTomo2 again".
+
+
+def full_reconstruction_present(dirs, full_stack, name):
+    """``rec_<tomo>/aretomo_full`` already has the reconstruction AND its .aln.
+
+    Both are required: an .aln without its reconstruction means AreTomo2 was
+    interrupted mid-run, and neither is any use for the half maps on its own.
+    """
+    reconstruction = os.path.join(dirs.aretomo_full, name + "_rec_tomo.mrc")
+    aln = find_aln(full_stack, dirs.aretomo_full, dirs.stacks)
+    return aln is not None and os.path.exists(reconstruction)
+
+
+def frame_half_maps_present(dirs, name):
+    """``rec_<tomo>/aretomo_even`` and ``aretomo_odd`` already hold both halves."""
+    even = os.path.join(dirs.aretomo_even, "even_%s_rec_tomo.mrc" % name)
+    odd = os.path.join(dirs.aretomo_odd, "odd_%s_rec_tomo.mrc" % name)
+    return os.path.exists(even) and os.path.exists(odd)
+
+
+def tilt_half_maps_present(dirs, name):
+    """``rec_<tomo>/aretomo_tiltSplit_even`` and ``_odd`` already hold both halves."""
+    even = os.path.join(dirs.tiltsplit("even"), "even_%s_rec_tomo.mrc" % name)
+    odd = os.path.join(dirs.tiltsplit("odd"), "odd_%s_rec_tomo.mrc" % name)
+    return os.path.exists(even) and os.path.exists(odd)
+
+
+def relink_existing_half_maps(config, tomo_name, do_tilt_split, log):
+    """Fill in any shared-directory symlink whose reconstruction already exists.
+
+    Safety net for a run that crashed between AreTomo2 finishing and the file
+    being linked in - nothing is recomputed, the existing reconstruction is
+    just picked up. A no-op for a tilt series that was never reconstructed at
+    all (``rec_<tomo>`` does not exist yet).
+    """
+    root = config.rec_dir(tomo_name)
+    if not os.path.isdir(root):
+        return
+
+    pairs = [(
+        (os.path.join(root, "aretomo_even", "even_%s_rec_tomo.mrc" % tomo_name),
+         os.path.join(root, "aretomo_odd", "odd_%s_rec_tomo.mrc" % tomo_name)),
+        half_map_targets(config, tomo_name),
+        "raw_halfMaps",
+    )]
+    if do_tilt_split:
+        pairs.append((
+            (os.path.join(root, "aretomo_tiltSplit_even",
+                          "even_%s_rec_tomo.mrc" % tomo_name),
+             os.path.join(root, "aretomo_tiltSplit_odd",
+                          "odd_%s_rec_tomo.mrc" % tomo_name)),
+            half_map_targets(config, tomo_name, tilt_split=True),
+            "raw_halfMaps_tiltSplit",
+        ))
+
+    for (even_source, odd_source), (even_target, odd_target), label in pairs:
+        for source, target in ((even_source, even_target),
+                               (odd_source, odd_target)):
+            if os.path.exists(source) and not os.path.lexists(target):
+                link_file(source, target)
+                log.quiet("  %s: relinked into %s (was missing)"
+                          % (tomo_name, label))
+
+
 # ------------------------------------------------------------ stage 1: prepare
 
 
@@ -591,6 +685,9 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
         for name in names:
             prep = by_name[name]
             # -VolZ 0 aligns without reconstructing, which is all we need here.
+            # output_dir keeps this out of aretomo_full: with -VolZ 0 AreTomo2
+            # writes the aligned STACK to -OutMrc rather than a reconstruction,
+            # and that must never be mistaken for the real one.
             _, log_file = align_full(
                 config, prep.dirs, prep.full_stack, prep.rawtlt, name,
                 prep.apix_binned,
@@ -598,12 +695,13 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
                 refine=0 if angle is not None else -1,
                 vol_z=0,
                 log_suffix="tiltaxis_iter%d" % iteration,
+                output_dir=prep.dirs.aretomo_tiltaxis,
                 dry_run=dry_run,
             )
             if dry_run:
                 measurements[name] = None
                 continue
-            aln = find_aln(prep.full_stack, prep.dirs.aretomo_full,
+            aln = find_aln(prep.full_stack, prep.dirs.aretomo_tiltaxis,
                            prep.dirs.stacks)
             value, source = tiltaxis.read_tilt_axis(aln, log_file)
             measurements[name] = value
@@ -671,13 +769,9 @@ def refine_tilt_axis(config, prepared, log, force=False, dry_run=False):
 def ensure_full_alignment(config, prep, tilt_axis, log, force=False,
                           dry_run=False):
     """The final full reconstruction, with the tilt axis fixed. Returns the .aln."""
-    reconstruction = os.path.join(prep.dirs.aretomo_full,
-                                  prep.name + "_rec_tomo.mrc")
-    existing = find_aln(prep.full_stack, prep.dirs.aretomo_full,
-                        prep.dirs.stacks)
-    if (not force and existing and os.path.exists(reconstruction)
-            and not dry_run):
-        return existing
+    if (not force and not dry_run
+            and full_reconstruction_present(prep.dirs, prep.full_stack, prep.name)):
+        return find_aln(prep.full_stack, prep.dirs.aretomo_full, prep.dirs.stacks)
 
     align_full(config, prep.dirs, prep.full_stack, prep.rawtlt, prep.name,
                prep.apix_binned,
@@ -692,31 +786,41 @@ def ensure_full_alignment(config, prep, tilt_axis, log, force=False,
 
 
 def frame_split_half_maps(config, prep, aln, log, force=False, dry_run=False):
-    """Even/odd FRAME half maps -> raw_halfMaps."""
+    """Even/odd FRAME half maps -> raw_halfMaps.
+
+    Skips straight to linking if ``rec_<tomo>/aretomo_even``/``aretomo_odd``
+    already hold both reconstructions - AreTomo2 is expensive, and a missing
+    shared-directory symlink alone (the only reason this is called at all) is
+    not a reason to redo it.
+    """
     dirs, name = prep.dirs, prep.name
-    even_stack = os.path.join(dirs.stacks, "even_%s_stacked.mrc" % name)
-    odd_stack = os.path.join(dirs.stacks, "odd_%s_stacked.mrc" % name)
-
-    for stack, marker in ((even_stack, "_averaged_EVN.mrc"),
-                          (odd_stack, "_averaged_ODD.mrc")):
-        if force or dry_run or not os.path.exists(stack):
-            members = [n.replace("_averaged.mrc", marker) for n in prep.ordered]
-            try:
-                build_stack(config, dirs, members, stack, dry_run=dry_run)
-            except CommandError as exc:
-                log.fail(name, "newstack failed on the %s half: %s"
-                         % ("even" if marker.endswith("EVN.mrc") else "odd", exc))
-                return False
-
     even_out = os.path.join(dirs.aretomo_even, "even_%s_rec_tomo.mrc" % name)
     odd_out = os.path.join(dirs.aretomo_odd, "odd_%s_rec_tomo.mrc" % name)
 
-    reconstruct_half(config, dirs, even_stack, aln, even_out,
-                     name + "_aretomo_even.log", prep.apix_binned,
-                     dirs.aretomo_even, dry_run=dry_run)
-    reconstruct_half(config, dirs, odd_stack, aln, odd_out,
-                     name + "_aretomo_odd.log", prep.apix_binned,
-                     dirs.aretomo_odd, dry_run=dry_run)
+    if force or dry_run or not frame_half_maps_present(dirs, name):
+        even_stack = os.path.join(dirs.stacks, "even_%s_stacked.mrc" % name)
+        odd_stack = os.path.join(dirs.stacks, "odd_%s_stacked.mrc" % name)
+
+        for stack, marker in ((even_stack, "_averaged_EVN.mrc"),
+                              (odd_stack, "_averaged_ODD.mrc")):
+            if force or dry_run or not os.path.exists(stack):
+                members = [n.replace("_averaged.mrc", marker) for n in prep.ordered]
+                try:
+                    build_stack(config, dirs, members, stack, dry_run=dry_run)
+                except CommandError as exc:
+                    log.fail(name, "newstack failed on the %s half: %s"
+                             % ("even" if marker.endswith("EVN.mrc") else "odd", exc))
+                    return False
+
+        reconstruct_half(config, dirs, even_stack, aln, even_out,
+                         name + "_aretomo_even.log", prep.apix_binned,
+                         dirs.aretomo_even, dry_run=dry_run)
+        reconstruct_half(config, dirs, odd_stack, aln, odd_out,
+                         name + "_aretomo_odd.log", prep.apix_binned,
+                         dirs.aretomo_odd, dry_run=dry_run)
+    else:
+        log.quiet("  %s: frame-split reconstructions already present in %s"
+                  % (name, dirs.root))
 
     if dry_run:
         return True
@@ -741,50 +845,57 @@ def tilt_split_half_maps(config, prep, aln, log, force=False, dry_run=False):
 
     Reuses the motion corrected averages and the alignment from the frame-split
     run: only the stack, the angle file and the .aln are split by tilt number.
+
+    Skips straight to linking if ``rec_<tomo>/aretomo_tiltSplit_even``/``_odd``
+    already hold both reconstructions - see ``frame_split_half_maps``.
     """
     dirs, name = prep.dirs, prep.name
-    binning, achieved = tiltsplit_binning(config, prep.apix_binned)
-
-    even_stack = os.path.join(dirs.stacks, "tiltSplit_even_%s.mrc" % name)
-    odd_stack = os.path.join(dirs.stacks, "tiltSplit_odd_%s.mrc" % name)
-    even_aln = os.path.join(dirs.stacks, "tiltSplit_even_%s.aln" % name)
-    odd_aln = os.path.join(dirs.stacks, "tiltSplit_odd_%s.aln" % name)
-    even_tlt = os.path.join(dirs.stacks, "tiltSplit_even_%s.rawtlt" % name)
-    odd_tlt = os.path.join(dirs.stacks, "tiltSplit_odd_%s.rawtlt" % name)
-
-    info("%s: tilt split at bin %d -> %.2f A/px (target %.1f)"
-         % (name, binning, achieved or 0.0,
-            float(config["tilt_split"]["target_pixel_size"])))
-
-    if not dry_run:
-        try:
-            # The alignment decides the split: it knows which sections AreTomo
-            # actually solved, so the stack and the angle file follow from it
-            # rather than from raw section parity.
-            even_sections, odd_sections = split_alignment(
-                aln, even_aln, odd_aln)
-            split_stack_file(prep.full_stack, even_stack, odd_stack,
-                             even_sections, odd_sections)
-            split_rawtlt(prep.rawtlt, even_tlt, odd_tlt,
-                         even_sections, odd_sections)
-            info("  %s: tilt split into %d + %d sections"
-                 % (name, len(even_sections), len(odd_sections)))
-        except Exception as exc:                      # noqa: BLE001
-            log.fail(name, "could not split the tilt series: %s" % exc)
-            log.task("AreTomo2 (tilt halves)", False, name)
-            return False
-
     even_dir = dirs.tiltsplit("even")
     odd_dir = dirs.tiltsplit("odd")
     even_out = os.path.join(even_dir, "even_%s_rec_tomo.mrc" % name)
     odd_out = os.path.join(odd_dir, "odd_%s_rec_tomo.mrc" % name)
 
-    reconstruct_half(config, dirs, even_stack, even_aln, even_out,
-                     name + "_aretomo_tiltSplit_even.log", prep.apix_binned,
-                     even_dir, binning=binning, dry_run=dry_run)
-    reconstruct_half(config, dirs, odd_stack, odd_aln, odd_out,
-                     name + "_aretomo_tiltSplit_odd.log", prep.apix_binned,
-                     odd_dir, binning=binning, dry_run=dry_run)
+    if force or dry_run or not tilt_half_maps_present(dirs, name):
+        binning, achieved = tiltsplit_binning(config, prep.apix_binned)
+
+        even_stack = os.path.join(dirs.stacks, "tiltSplit_even_%s.mrc" % name)
+        odd_stack = os.path.join(dirs.stacks, "tiltSplit_odd_%s.mrc" % name)
+        even_aln = os.path.join(dirs.stacks, "tiltSplit_even_%s.aln" % name)
+        odd_aln = os.path.join(dirs.stacks, "tiltSplit_odd_%s.aln" % name)
+        even_tlt = os.path.join(dirs.stacks, "tiltSplit_even_%s.rawtlt" % name)
+        odd_tlt = os.path.join(dirs.stacks, "tiltSplit_odd_%s.rawtlt" % name)
+
+        info("%s: tilt split at bin %d -> %.2f A/px (target %.1f)"
+             % (name, binning, achieved or 0.0,
+                float(config["tilt_split"]["target_pixel_size"])))
+
+        if not dry_run:
+            try:
+                # The alignment decides the split: it knows which sections
+                # AreTomo actually solved, so the stack and the angle file
+                # follow from it rather than from raw section parity.
+                even_sections, odd_sections = split_alignment(
+                    aln, even_aln, odd_aln)
+                split_stack_file(prep.full_stack, even_stack, odd_stack,
+                                 even_sections, odd_sections)
+                split_rawtlt(prep.rawtlt, even_tlt, odd_tlt,
+                             even_sections, odd_sections)
+                info("  %s: tilt split into %d + %d sections"
+                     % (name, len(even_sections), len(odd_sections)))
+            except Exception as exc:                      # noqa: BLE001
+                log.fail(name, "could not split the tilt series: %s" % exc)
+                log.task("AreTomo2 (tilt halves)", False, name)
+                return False
+
+        reconstruct_half(config, dirs, even_stack, even_aln, even_out,
+                         name + "_aretomo_tiltSplit_even.log", prep.apix_binned,
+                         even_dir, binning=binning, dry_run=dry_run)
+        reconstruct_half(config, dirs, odd_stack, odd_aln, odd_out,
+                         name + "_aretomo_tiltSplit_odd.log", prep.apix_binned,
+                         odd_dir, binning=binning, dry_run=dry_run)
+    else:
+        log.quiet("  %s: tilt-split reconstructions already present in %s"
+                  % (name, dirs.root))
 
     if dry_run:
         return True
@@ -830,14 +941,36 @@ def create_half_maps(config, force=None, dry_run=False):
         log.note("frame splitting: always; tilt splitting: %s"
                  % ("yes" if do_tilt_split else "no"))
 
-        # Which tilt series still need work?
+        # Is the dataset-wide tilt axis already settled? Every AreTomo2
+        # reconstruction depends on it, so if it still needs solving (no
+        # converged value on record, and refinement is not disabled), nothing
+        # already built - even for a tilt series that otherwise looks
+        # complete - can be trusted until it is rebuilt with the new value.
+        tilt_axis_iterations = int(config["aretomo"]["tilt_axis_iterations"])
+        tilt_axis_known = (
+            tilt_axis_iterations <= 0
+            or (not force and tiltaxis.read_converged_angle(config) is not None)
+        )
+        force_aretomo = force or not tilt_axis_known
+        if force_aretomo and not force:
+            info("no converged tilt axis on record (%s) - solving it and "
+                 "redoing every AreTomo2 reconstruction to match."
+                 % tiltaxis.report_path(config))
+
+        # Which tilt series still need work? Motion correction and stacking
+        # are unaffected by the tilt axis, so this stays the cheap
+        # shared-directory check even when force_aretomo forces every series
+        # through the AreTomo2 stages below.
         todo = []
         for series in all_series:
+            if force_aretomo:
+                todo.append(series)
+                continue
             frame_done = half_maps_present(config, series.name)
             tilt_done = (not do_tilt_split
                          or half_maps_present(config, series.name,
                                               tilt_split=True))
-            if not force and frame_done and tilt_done:
+            if frame_done and tilt_done:
                 log.skip(series.name, "half maps already present")
                 continue
             todo.append(series)
@@ -868,15 +1001,20 @@ def create_half_maps(config, force=None, dry_run=False):
             return 1
 
         # --- stage 2 -------------------------------------------------------
-        tilt_axis = refine_tilt_axis(config, prepared, log, force=force,
+        tilt_axis = refine_tilt_axis(config, prepared, log, force=force_aretomo,
                                      dry_run=dry_run)
 
         # --- stages 3 and 4 ------------------------------------------------
+        # ensure_full_alignment / frame_split_half_maps / tilt_split_half_maps
+        # each check their own rec_<tomo>/aretomo_* outputs before doing any
+        # work, so force_aretomo aside, calling them is always safe - a
+        # tilt series only in ``todo`` because ONE half was missing does not
+        # pay to redo the other.
         for prep in prepared:
             banner("Reconstructing %s" % prep.name)
             try:
                 aln = ensure_full_alignment(config, prep, tilt_axis, log,
-                                            force=force, dry_run=dry_run)
+                                            force=force_aretomo, dry_run=dry_run)
                 if aln is None:
                     if not dry_run:
                         log.fail(prep.name, "AreTomo2 produced no .aln - "
@@ -887,27 +1025,26 @@ def create_half_maps(config, force=None, dry_run=False):
                                        prep.name + "_stacked.aln")
                 info("using alignment %s" % aln)
 
-                ok = True
-                if force or not half_maps_present(config, prep.name):
-                    ok = frame_split_half_maps(config, prep, aln, log,
-                                               force=force, dry_run=dry_run)
-                else:
-                    log.quiet("  %s: frame-split half maps already present"
-                              % prep.name)
+                ok = frame_split_half_maps(config, prep, aln, log,
+                                           force=force_aretomo, dry_run=dry_run)
 
                 if ok and do_tilt_split:
-                    if force or not half_maps_present(config, prep.name,
-                                                      tilt_split=True):
-                        ok = tilt_split_half_maps(config, prep, aln, log,
-                                                  force=force, dry_run=dry_run)
-                    else:
-                        log.quiet("  %s: tilt-split half maps already present"
-                                  % prep.name)
+                    ok = tilt_split_half_maps(config, prep, aln, log,
+                                              force=force_aretomo, dry_run=dry_run)
 
                 if ok:
                     log.ok(prep.name)
             except CommandError as exc:
                 log.fail(prep.name, str(exc))
+
+        # --- final check -----------------------------------------------------
+        # Fill in any shared-directory symlink still missing for a
+        # reconstruction that already exists - covers tilt series this run
+        # did not touch too (e.g. a previous run crashed after AreTomo2
+        # finished but before linking).
+        if not dry_run:
+            for series in all_series:
+                relink_existing_half_maps(config, series.name, do_tilt_split, log)
 
         log.note("")
         log.note("frame-split half maps: %s" % config.raw_halfmaps_dir)

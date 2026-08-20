@@ -11,7 +11,9 @@
   5. ``isonet.py refine``        missing-wedge network
 
 ``predict_isonet`` is the final step: apply the refined network to the
-prediction set.
+prediction set. Its output - the only directory holding the finished,
+deliverable tomograms - is ``isonet/corrected_tomos_final/`` (see the output
+layout below ``DENOISE_DIR`` and friends).
 """
 
 import glob
@@ -31,6 +33,32 @@ from .utils import (
     warn,
     gpu_flag_isonet,
 )
+
+# ------------------------------------------------------ isonet output layout
+#
+# Passed explicitly as --output_dir / --output_prefix on every isonet.py call
+# below, rather than left to isonet.py's own defaults: two different calls
+# (the intermediate predict needed only for make_mask, and the final predict
+# on the refined network) both invoke ``isonet.py predict``, and without an
+# explicit, distinct --output_dir they would land in the very same directory
+# under the same names - the final result silently indistinguishable from,
+# and liable to mix with, the intermediate one.
+#
+#   <processing_directory>/isonet/
+#     denoise/                    noise2noise networks         (train step 2)
+#     predict_denoise_only/       denoise_*.mrc - intermediate, feeds
+#                                  make_mask ONLY, not a deliverable
+#     mask/                       masks from the denoised volumes (step 4)
+#     isonet_maps/                missing-wedge networks        (step 5)
+#     corrected_tomos_final/      final_*.mrc - THE deliverable: denoised AND
+#                                  missing-wedge corrected
+DENOISE_DIR = "denoise"
+DENOISE_PREDICT_DIR = "predict_denoise_only"
+DENOISE_PREDICT_PREFIX = "denoise_"
+MASK_DIR = "mask"
+REFINE_DIR = "isonet_maps"
+FINAL_PREDICT_DIR = "corrected_tomos_final"
+FINAL_PREDICT_PREFIX = "final_"
 
 
 # ------------------------------------------------------------------ half maps
@@ -448,7 +476,7 @@ def _train(config, log, force_ctf=False, force=False, dry_run=False):
 
     if not force and step_completed(config, "train_isonet"):
         try:
-            network = resolve_network(config, "refine_network", "isonet_maps")
+            network = resolve_network(config, "refine_network", REFINE_DIR)
         except SystemExit:
             network = None
         if network:
@@ -472,16 +500,19 @@ def _train(config, log, force_ctf=False, force=False, dry_run=False):
     banner("IsoNet 2/5  denoise (%d epochs)" % int(settings["denoise_epochs"]))
     run([config.exe("isonet"), "denoise", star,
          "--CTF_mode", str(settings["ctf_mode"]),
-         "--epochs", str(int(settings["denoise_epochs"]))]
+         "--epochs", str(int(settings["denoise_epochs"])),
+         "--output_dir", DENOISE_DIR]
         + _gpu_args(config) + _extra_args(config),
         cwd=work, log_file=os.path.join(logs, "denoise.log"), dry_run=dry_run)
 
-    banner("IsoNet 3/5  apply the denoiser")
+    banner("IsoNet 3/5  apply the denoiser (intermediate - feeds make_mask only)")
     denoise_network = (
-        os.path.join(work, "denoise", "network.pt") if dry_run
-        else resolve_network(config, "denoise_network", "denoise")
+        os.path.join(work, DENOISE_DIR, "network.pt") if dry_run
+        else resolve_network(config, "denoise_network", DENOISE_DIR)
     )
-    run([config.exe("isonet"), "predict", star, denoise_network]
+    run([config.exe("isonet"), "predict", star, denoise_network,
+         "--output_dir", DENOISE_PREDICT_DIR,
+         "--output_prefix", DENOISE_PREDICT_PREFIX]
         + _gpu_args(config) + _extra_args(config),
         cwd=work, log_file=os.path.join(logs, "predict_denoise.log"),
         dry_run=dry_run)
@@ -490,7 +521,8 @@ def _train(config, log, force_ctf=False, force=False, dry_run=False):
     run([config.exe("isonet"), "make_mask", star,
          "--density_percentage", str(settings["density_percentage"]),
          "--std_percentage", str(settings["std_percentage"]),
-         "--input_column", "rlnDenoisedTomoName"],
+         "--input_column", "rlnDenoisedTomoName",
+         "--output_dir", MASK_DIR],
         cwd=work, log_file=os.path.join(logs, "make_mask.log"), dry_run=dry_run)
 
     banner("IsoNet 5/5  refine (%d epochs)" % int(settings["refine_epochs"]))
@@ -498,13 +530,14 @@ def _train(config, log, force_ctf=False, force=False, dry_run=False):
          "--CTF_mode", str(settings["ctf_mode"]),
          "--mw_weight", str(settings["mw_weight"]),
          "--bfactor", str(settings["bfactor"]),
-         "--epochs", str(int(settings["refine_epochs"]))]
+         "--epochs", str(int(settings["refine_epochs"])),
+         "--output_dir", REFINE_DIR]
         + _gpu_args(config) + _extra_args(config),
         cwd=work, log_file=os.path.join(logs, "refine.log"), dry_run=dry_run)
 
     info("IsoNet training finished. Networks are in %s"
-         % os.path.join(work, "isonet_maps"))
-    log.note("networks: %s" % os.path.join(work, "isonet_maps"))
+         % os.path.join(work, REFINE_DIR))
+    log.note("networks: %s" % os.path.join(work, REFINE_DIR))
     for entry in series_list:
         log.ok(entry.name)
     return 0
@@ -542,17 +575,20 @@ def _predict(config, log, force_ctf=False, force=False, dry_run=False):
                                dry_run=dry_run)
 
         network = (
-            os.path.join(work, "isonet_maps", "network.pt") if dry_run
-            else resolve_network(config, "refine_network", "isonet_maps")
+            os.path.join(work, REFINE_DIR, "network.pt") if dry_run
+            else resolve_network(config, "refine_network", REFINE_DIR)
         )
 
-        run([config.exe("isonet"), "predict", star, network]
+        run([config.exe("isonet"), "predict", star, network,
+             "--output_dir", FINAL_PREDICT_DIR,
+             "--output_prefix", FINAL_PREDICT_PREFIX]
             + _gpu_args(config) + _extra_args(config),
             cwd=work, log_file=os.path.join(logs, "predict_refine.log"),
             dry_run=dry_run)
 
-    info("IsoNet prediction finished. Output is under %s" % work)
-    log.note("output: %s" % work)
+    final_dir = os.path.join(work, FINAL_PREDICT_DIR)
+    info("IsoNet prediction finished. Final denoised tomograms: %s" % final_dir)
+    log.note("final denoised tomograms: %s" % final_dir)
     for entry in series_list:
         log.ok(entry.name)
 
