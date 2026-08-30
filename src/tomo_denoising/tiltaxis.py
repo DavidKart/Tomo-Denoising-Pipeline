@@ -2,12 +2,13 @@
 
 The tilt axis is a property of the microscope, not of an individual tilt
 series, so estimating it once from several series and then holding it fixed is
-both more robust and more consistent than letting AreTomo2 solve it
-independently every time. This mirrors what WarpTools does.
+both more robust and more consistent than letting AreTomo solve it
+independently every time. This mirrors what WarpTools does, and works around
+WarpTools' own inability to average a tilt axis across a dataset.
 
 Each iteration aligns a random subset of tilt series, combines their tilt axis
 angles into one robust estimate, and hands that to the next iteration as the
-starting point. AreTomo2 refines an supplied angle only within +/-3 degrees, so
+starting point. AreTomo refines a supplied angle only within +/-3 degrees, so
 successive iterations converge rather than wander.
 """
 
@@ -241,7 +242,7 @@ def write_report(config, rows, final_angle, note=""):
 
     lines = [
         "=" * 78,
-        "AreTomo2 tilt axis refinement",
+        "AreTomo tilt axis refinement",
         "=" * 78,
         "written    : %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
         "processing : %s" % config.processing_dir,
@@ -297,8 +298,8 @@ def write_report(config, rows, final_angle, note=""):
     else:
         lines.append("CONVERGED TILT AXIS: %+.4f deg" % final_angle)
         lines.append("")
-        lines.append("All tilt series were then reconstructed once with")
-        lines.append("  -TiltAxis %.4f -1   (angle fixed, no further refinement)"
+        lines.append("Every tilt series was then aligned once by native WarpTools")
+        lines.append("  ts_aretomo3 --axis %.4f --axis_iter 0   (angle fixed, no search)"
                      % final_angle)
     if note:
         lines.append("")

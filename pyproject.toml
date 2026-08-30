@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tomo-denoising-pipeline"
 version = "1.0.0"
-description = "One-click cryo-ET pipeline: raw frames to denoised tomograms via MotionCor3, IMOD, AreTomo2, cryoCARE and IsoNet."
+description = "One-click cryo-ET pipeline: raw frames to denoised tomograms via WarpTools, AreTomo, optional MissAlignment refinement and IsoNet."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [{ name = "DavidKart" }]
-keywords = ["cryo-ET", "tomography", "denoising", "cryoCARE", "IsoNet", "AreTomo"]
+keywords = ["cryo-ET", "tomography", "denoising", "WarpTools", "IsoNet", "AreTomo", "MissAlignment"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Bio-Informatics",

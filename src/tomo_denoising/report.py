@@ -29,16 +29,15 @@ from .mdoc import match_tomo_name
 from .utils import ensure_dir, info, warn
 
 #: Where each denoiser leaves its predictions, relative to the processing dir.
-#: For isonet, "corrected_tomos_final" (see isonet.FINAL_PREDICT_DIR - kept as
-#: a literal here rather than imported, to not couple the two modules) is the
-#: only genuinely final output and comes first; "corrected_tomos" is a
-#: fallback for runs made before the final predict got its own --output_dir,
-#: separate from the intermediate denoise-only predict. The network
-#: directories (denoise/, isonet_maps/) are deliberately NOT listed here -
-#: they hold trained networks, not denoised tomograms, and any stray volume
-#: isonet.py's refine step drops in there is not the deliverable either.
+#: "corrected_tomos_final" (see isonet.FINAL_PREDICT_DIR - kept as a literal
+#: here rather than imported, to not couple the two modules) is the only
+#: genuinely final output and comes first; "corrected_tomos" is a fallback
+#: for runs made before the final predict got its own --output_dir, separate
+#: from the intermediate denoise-only predict. The network directories
+#: (denoise/, isonet_maps/) are deliberately NOT listed here - they hold
+#: trained networks, not denoised tomograms, and any stray volume isonet.py's
+#: refine step drops in there is not the deliverable either.
 DENOISER_OUTPUTS = {
-    "cryoCARE": ["denoised_cryoCARE"],
     "isonet": [
         os.path.join("isonet", "corrected_tomos_final"),
         os.path.join("isonet", "corrected_tomos"),

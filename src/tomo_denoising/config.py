@@ -26,43 +26,72 @@ DEFAULTS = {
         "predict": "",
     },
     "executables": {
-        "motioncor": "MotionCor3",
-        "aretomo": "AreTomo2",
-        "newstack": "newstack",
-        "header": "header",
-        "ctffind": "ctffind",
-        "cryocare_extract": "cryoCARE_extract_train_data.py",
-        "cryocare_train": "cryoCARE_train.py",
-        "cryocare_predict": "cryoCARE_predict.py",
+        # The SAME AreTomo build/version is used everywhere - both for our own
+        # external tilt-axis-search calls and passed to WarpTools'
+        # ts_aretomo3 --exe.
+        "aretomo": "AreTomo3",
+        "header": "header",                # IMOD, pixel-size fallback only
         "isonet": "isonet.py",
         "resolve": "RESOLVE",
+        "warptools": "WarpTools",
+        "missalign": "miss-alignment",
+        # Only used when missalign.conda_env is set - see that section.
+        "conda": "conda",
     },
     "overwrite": False,
     "gpus": [0, 1],
     "acquisition": {
         "pixel_size": "read",
-        "frame_extension": "tiff",
+        "frame_extension": "tiff",         # tif/tiff/eer
         "gain": "",
+        "gain_flip_x": False,
+        "gain_flip_y": False,
+        "gain_transpose": False,
         "voltage": 300.0,
         "spherical_aberration": 2.7,
         "amplitude_contrast": 0.1,
     },
-    "motioncor": {
-        "flip_gain": 2,
-        "binning": 2,
-        "iterations": 7,
-        "tolerance": 0.5,
-        "eer_sampling": 1,
-        "fm_int_file": "",
+    "frameseries": {
+        # log2 Fourier binning WarpTools applies when producing averages
+        # (WarpTools' own --bin convention: 0 = none, 1 = bin by 2, ...).
+        "bin": 0,
+        # Dose PER TILT, e-/A^2 - WarpTools needs this explicitly for its own
+        # dose-weighting; MotionCor3 never needed it, so this is new.
+        "exposure": 3.0,
+        # Only used when acquisition.frame_extension is "eer". Passed on
+        # create_settings (not fs_motion_and_ctf, which rejects it) - EER
+        # grouping is a property of how the raw data is read, so it's fixed
+        # once when the .settings file is created.
+        "eer_ngroups": "",
+        "m_grid": "1x1x3",
+        "c_grid": "2x2x1",
+        "c_range_max": 7.0,
+        "c_defocus_max": 8.0,
+        "c_use_sum": True,
+        "perdevice": 1,
         "extra_args": "",
     },
+    "tomo_dimensions": {
+        # "auto" -> taken from a motion-corrected average's own pixel shape,
+        # scaled back up to unbinned. Or set explicitly, e.g. "4400x6000".
+        "xy": "auto",
+        "z": 1200,
+    },
     "aretomo": {
-        "binning": 4,
-        "vol_z": 1200,
-        "local_align": "-Patch 4 5",
-        "tilt_axis_correction": True,
+        # Only used for OUR OWN external, alignment-only tilt-axis-search
+        # calls (tiltaxis.py) - the real per-tomogram alignment runs through
+        # native WarpTools ts_aretomo3 instead (see the warptools section).
         "dark_tolerance": 0.5,
         "wbp": True,
+        # "" (default) -> the first iteration is a free search. Set to a
+        # degrees value to use it as the starting point for iteration 1
+        # instead (refined within +/-3 deg, same as every later iteration);
+        # iteration 2 onward still takes the previous iteration's result as
+        # usual. With tilt_axis_iterations: 0, this value is instead used
+        # directly AS the converged tilt axis, with no external search at
+        # all - the opposite of tilt_axis_iterations: 0 with this left
+        # empty, which searches each tomogram independently via ts_aretomo3.
+        "initial_tilt_axis": "",
         "tilt_axis_iterations": 3,
         "tilt_axis_subset_size": 10,
         "tilt_axis_seed": 0,
@@ -70,7 +99,22 @@ DEFAULTS = {
     },
     "tilt_split": {
         "enabled": True,
-        "target_pixel_size": 50.0,
+        "target_pixel_size": 40.0,
+    },
+    "warptools": {
+        "dont_invert": False,
+        "min_intensity": 0.3,
+        # Pixel size (A) for ts_stack / our own axis-search AreTomo calls /
+        # native ts_aretomo3. A coarser value than the final reconstruction,
+        # matching how alignment is normally done.
+        "align_angpix": 10.0,
+        # Final reconstruction pixel size (A), for ts_reconstruct.
+        "recon_angpix": 9.0,
+        "min_fov": 0,
+        "auto_fix_defocus_hand": True,
+        "ts_ctf_range_high": 7.0,
+        "ts_ctf_defocus_max": 8.0,
+        "perdevice": 1,
     },
     "quality_check": {
         "fast": True,
@@ -80,27 +124,18 @@ DEFAULTS = {
         "min_signal_ratio": 0.25,
         "outlier_factor": 1.5,
     },
-    "cryocare": {
-        "model_name": "denoise_model",
-        "patch_shape": [72, 72, 72],
-        "num_slices": 1800,
-        "split": 0.9,
-        "tilt_axis": "Y",
-        "n_normalization_samples": 500,
-        "epochs": 100,
-        "steps_per_epoch": 200,
-        "batch_size": 16,
-        "unet_kern_size": 3,
-        "unet_n_depth": 3,
-        "unet_n_first": 32,
-        "learning_rate": 0.0004,
-        "n_tiles": [8, 8, 8],
-        "overwrite": True,
-    },
     "isonet": {
         "denoise_epochs": 50,
         "refine_epochs": 100,
-        "ctf_mode": "network",
+        # "None" (the exact string IsoNet2's CLI expects - not "none", not
+        # a null/empty value): the half maps IsoNet trains on are already
+        # CTF-corrected by WarpTools (ts_defocus_hand -> ts_ctf ->
+        # ts_reconstruct, run before IsoNet ever sees them). IsoNet2's other
+        # modes ("network"/"wiener"/"phase_only") each assume RAW,
+        # un-CTF-corrected weighted-back-projection input and apply their
+        # own CTF-shaped correction on top - using one of them here would
+        # double-correct already-corrected data.
+        "ctf_mode": "None",
         "density_percentage": 50,
         "std_percentage": 80,
         "mw_weight": 200,
@@ -110,13 +145,32 @@ DEFAULTS = {
         "refine_network": "auto",
         "extra_args": "",
     },
-    "ctffind": {
-        "box_size": 512,
-        "min_resolution": 50.0,
-        "max_resolution": 5.0,
-        "min_defocus": 5000.0,
-        "max_defocus": 70000.0,
-        "defocus_step": 500.0,
+    "missalign": {
+        "enabled": True,
+        # "XxYxZ" (unbinned px, same convention as tomo_dimensions) to
+        # tighten the volume MissAlignment trains against so it does not
+        # spend capacity on empty margins - see MissAlignment's own docs.
+        # Leave empty (default) to train against the same dimensions as the
+        # final reconstruction (tomo_dimensions).
+        "training_volume_dimensions": "",
+        # Name (or path) of the conda/mamba environment miss-alignment is
+        # installed in, if it lives in a separate one from the rest of the
+        # pipeline. When set, "miss-alignment train" is run via
+        # `conda run -n <env> --no-capture-output ...` (executables.conda),
+        # so that environment does not need to be activated beforehand.
+        # Leave empty (default) if executables.missalign is already directly
+        # runnable (e.g. an absolute path into that environment's own bin/,
+        # or miss-alignment is installed in the same environment
+        # tomo_denoising itself runs in).
+        "conda_env": "",
+        "gpu_memory_gb": 12,
+        # null = auto-compute from gpu_memory_gb / config.gpus. Set any of
+        # these explicitly to override the auto-partitioning.
+        "batch_size": None,
+        "training_devices": None,
+        "reconstruction_devices": None,
+        "dataloaders_per_trainer": None,
+        "prepare_stacks_gb": 10.0,
     },
 }
 
@@ -208,15 +262,12 @@ class Config(object):
             )
 
         ext = str(self.data["acquisition"]["frame_extension"]).lower().lstrip(".")
-        if ext not in ("tif", "tiff", "mrc", "eer"):
+        if ext not in ("tif", "tiff", "eer"):
             raise ConfigError(
-                "acquisition.frame_extension must be one of tif/tiff/mrc/eer, "
+                "acquisition.frame_extension must be one of tif/tiff/eer, "
                 "got %r" % ext
             )
         self.data["acquisition"]["frame_extension"] = ext
-
-        # Tilt splitting is additive now: it reuses the alignment solved on the
-        # full frame-split run, so local patch alignment stays enabled.
 
     # ------------------------------------------------------------- accessors
     def __getitem__(self, key):
@@ -260,8 +311,8 @@ class Config(object):
         A standalone path, like the mdoc directories: an absolute path is used
         as given, a relative one is resolved against the current working
         directory. It is never joined to input_frames. Raises if one is
-        configured but missing, since MotionCor3 would otherwise fail once per
-        tilt with a less obvious message.
+        configured but missing, since WarpTools would otherwise fail deep
+        inside fs_motion_and_ctf with a less obvious message.
         """
         raw = str(self.data["acquisition"].get("gain") or "").strip()
         if not raw:
@@ -289,6 +340,12 @@ class Config(object):
         return bool(self.data.get("overwrite", False))
 
     @property
+    def tomograms_dir(self):
+        """Full, non-split reconstructions - always produced by
+        reconstruct_tomograms, independent of whether half maps are."""
+        return self.sub("tomograms")
+
+    @property
     def raw_halfmaps_dir(self):
         return self.sub("raw_halfMaps")
 
@@ -310,14 +367,6 @@ class Config(object):
         return self.sub("logs", ".state")
 
     @property
-    def cryocare_config_dir(self):
-        return self.sub("cryocare_config")
-
-    @property
-    def cryocare_dir(self):
-        return self.sub("cryocare")
-
-    @property
     def isonet_config_dir(self):
         return self.sub("isonet_config")
 
@@ -325,8 +374,78 @@ class Config(object):
     def isonet_dir(self):
         return self.sub("isonet")
 
-    def rec_dir(self, tomo_name):
-        return self.sub("rec_" + tomo_name)
+    # ------------------------------------------------------- WarpTools project
+    @property
+    def warp_frameseries_settings_path(self):
+        return self.sub("warp_frameseries.settings")
+
+    @property
+    def warp_frameseries_dir(self):
+        return self.sub("warp_frameseries")
+
+    @property
+    def tomostar_dir(self):
+        return self.sub("tomostar")
+
+    @property
+    def warp_tiltseries_settings_path(self):
+        return self.sub("warp_tiltseries.settings")
+
+    @property
+    def warp_tiltseries_dir(self):
+        return self.sub("warp_tiltseries")
+
+    @property
+    def warp_tiltseries_prealign_dir(self):
+        """Backup of each per-tomogram XML, taken before miss-alignment
+        modifies the originals in place."""
+        return self.sub("warp_tiltseries_prealign")
+
+    @property
+    def tiltstack_dir(self):
+        """ts_stack output: <tomo>/<tomo>.st + .rawtlt, one dir per series."""
+        return self.sub("warp_tiltseries", "tiltstack")
+
+    @property
+    def tiltaxis_search_dir(self):
+        """Scratch home for our own external, alignment-only AreTomo runs
+        (-OutDir).
+
+        Never warp_tiltseries/tiltstack itself: with -VolZ 0 AreTomo writes
+        an aligned stack here rather than a reconstruction, and that must
+        never be mistaken by anything for real project state.
+        """
+        return self.sub("warp_tiltseries", "tiltaxis_search")
+
+    @property
+    def reconstruction_dir(self):
+        return self.sub("warp_tiltseries", "reconstruction")
+
+    @property
+    def mdocs_filtered_dir(self):
+        """Copies of mdocs.preprocessing with tilts that have no WarpTools
+        frame-series data removed - see warptools._sanitize_mdocs. Only
+        created (and only used for ts_import) when at least one mdoc
+        actually needed filtering; mdocs.preprocessing itself is never
+        written to."""
+        return self.sub("mdocs_filtered")
+
+    # -------------------------------------------------------- MissAlignment
+    @property
+    def missalignment_dir(self):
+        return self.sub("missalignment")
+
+    @property
+    def missalignment_halfmaps_dir(self):
+        return self.sub("missalignment", "halfMaps")
+
+    @property
+    def missalignment_tiltsplit_halfmaps_dir(self):
+        return self.sub("missalignment", "halfMaps_tiltSplit")
+
+    @property
+    def missalignment_logs_dir(self):
+        return self.sub("missalignment", "logs")
 
     def mdoc_dir(self, which):
         """Absolute path of the mdoc directory for 'preprocessing'/'train'/'predict'.

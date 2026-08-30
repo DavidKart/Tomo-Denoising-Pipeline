@@ -3,17 +3,25 @@
 # =============================================================================
 #  Edit this file, then run the pipeline steps in order:
 #
-#    tomo_denoising create_halfMaps      # frames -> tomograms + even/odd half maps
-#    tomo_denoising quality_check        # RESOLVE resolution estimate + report
-#    tomo_denoising train_cryoCARE       # cryoCARE training   (mdocs.train set)
-#    tomo_denoising predict_cryoCARE     # cryoCARE denoising  (mdocs.predict set)
-#    tomo_denoising train_isonet         # IsoNet training     (mdocs.train set)
-#    tomo_denoising predict_isonet       # IsoNet denoising    (mdocs.predict set)
+#    tomo_denoising motion_correct        WarpTools create_settings + fs_motion_and_ctf
+#    tomo_denoising align_tiltseries      ts_import, ts_stack, tilt axis search, ts_aretomo3
+#    tomo_denoising reconstruct_tomograms ts_defocus_hand, ts_ctf, ts_reconstruct
+#    tomo_denoising run_missalignment     MissAlignment-refined reconstruction
+#    tomo_denoising quality_check         RESOLVE resolution estimate + report
+#    tomo_denoising train_isonet          IsoNet training     (mdocs.train set)
+#    tomo_denoising predict_isonet        IsoNet denoising    (mdocs.predict set)
 #
 #  Or run the whole thing in one go:
 #
-#    tomo_denoising run_pipe --denoiser cryocare
-#    tomo_denoising run_pipe --denoiser isonet --skip-quality
+#    tomo_denoising run_pipe
+#    tomo_denoising run_pipe --skip-quality
+#    tomo_denoising run_pipe --skip-missalignment
+#
+#  run_missalignment runs by default as part of run_pipe (pass
+#  --skip-missalignment to disable it). Once its half maps exist (from a
+#  previous run_missalignment, this run or an earlier one), IsoNet and
+#  quality_check's resolution comparison report prefer them automatically -
+#  see the 'missalign' section below.
 #
 #  Every step reads this file. Pass a different one with  -c / --config.
 #  Every step writes a summary to <processing_directory>/logs/.
@@ -24,10 +32,7 @@
 #  Resuming
 # -----------------------------------------------------------------------------
 #  false (default): every step checks what is already finished and only redoes
-#                   what is missing or was interrupted. Tilt series that
-#                   already have their half maps are skipped, a completed
-#                   training is not repeated, and a previously converged tilt
-#                   axis is reused instead of being refined again.
+#                   what is missing or was interrupted. 
 #  true:            redo everything from scratch, ignoring previous results.
 #
 #  Individual steps also accept --force on the command line, which overrides
@@ -40,8 +45,8 @@ overwrite: false
 # -----------------------------------------------------------------------------
 paths:
 
-  # Directory holding the RAW movie frames (.tif / .tiff / .mrc / .eer) and the
-  # gain reference. This directory is only ever READ FROM - nothing is written
+  # Directory holding the RAW movie frames (.tif / .tiff / .eer) and the gain
+  # reference. This directory is only ever READ FROM - nothing is written
   # here. The file names are taken from the SubFramePath entries of the mdocs.
   input_frames: "frames"
 
@@ -49,13 +54,21 @@ paths:
   # Created if it does not exist. Everything below is created inside it:
   #
   #   <processing_directory>/
-  #     rec_<tomo>/       <- one self-contained directory per tilt series
-  #     raw_halfMaps/     <- every even_/odd_ half map produced
-  #     cryocare_config/  <- generated cryoCARE .json configs
-  #     cryocare/         <- cryoCARE training data + model
-  #     denoised_cryoCARE/
-  #     isonet_config/    <- ctffind results + the star files
-  #     isonet/           <- IsoNet working directory (networks, masks, output)
+  #     warp_frameseries.settings / warp_frameseries/   <- fs_motion_and_ctf
+  #     tomostar/                                       <- ts_import
+  #     warp_tiltseries.settings / warp_tiltseries/      <- alignment + recon
+  #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3)
+  #       tiltstack/<tomo>/     ts_stack output
+  #       reconstruction/       ts_reconstruct output
+  #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
+  #     tomograms/                 <- full, non-split tomograms (always made)
+  #     raw_halfMaps/              <- every even_/odd_ half map produced
+  #     raw_halfMaps_tiltSplit/    <- tilt-split half maps, for RESOLVE
+  #     missalignment/             <- MissAlignment-refined reconstructions +
+  #                                   half maps (halfMaps/, halfMaps_tiltSplit/
+  #                                   - preferred by default once populated)
+  #     isonet_config/    <- the IsoNet star files
+  #     isonet/            <- IsoNet working directory (networks, masks, output)
   #
   # The mdoc directories and frame directory may live anywhere.
   processing_directory: "processing"
@@ -68,21 +81,21 @@ paths:
 #
 #  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
 #  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
-#  "TS_01.mrc.mdoc" -> tomogram "TS_01" -> directory "rec_TS_01".
+#  "TS_01.mrc.mdoc" -> tomogram "TS_01".
 # -----------------------------------------------------------------------------
 mdocs:
 
-  # Tilt series to reconstruct in  create_halfMaps.
+  # Tilt series to reconstruct.
   preprocessing: "mdocs"
 
-  # Tilt series used to TRAIN cryoCARE / IsoNet.
+  # Tilt series used to TRAIN IsoNet.
   # A small representative subset (3-5 tomograms) is normally plenty.
-  # If there is no knowledge about well-suited tilt-series, this directory 
+  # If there is no knowledge about well-suited tilt-series, this directory
   # can be auto-filled by estimation of tomogram quality with RESOLVE.
   # Auto fill only applies when the directory is empty or non-existent.
   train: "mdocsTrain"
 
-  # Tilt series to denoise in  predict_cryoCARE / predict_isonet.
+  # Tilt series to denoise in  predict_isonet.
   predict: "mdocs"
 
 
@@ -92,23 +105,21 @@ mdocs:
 #  Either a bare name (looked up on PATH) or an absolute path to the binary.
 # -----------------------------------------------------------------------------
 executables:
-  motioncor:         "MotionCor3"
-  aretomo:           "AreTomo2"
-  newstack:          "newstack"                      # IMOD
-  header:            "header"                        # IMOD, used to read the pixel size
-  ctffind:           "ctffind"                       # CTFFIND4, IsoNet defocus estimate
-  cryocare_extract:  "cryoCARE_extract_train_data.py"
-  cryocare_train:    "cryoCARE_train.py"
-  cryocare_predict:  "cryoCARE_predict.py"
-  isonet:            "isonet.py"
-  resolve:           "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
-
+  aretomo:    "AreTomo3"
+  header:     "header"                        # IMOD, pixel-size fallback only
+  isonet:     "isonet.py"
+  resolve:    "/path/to/RESOLVE" # quality_check
+  warptools:  "WarpTools"
+  missalign:  "miss-alignment"                # run_missalignment
+  # Only used if missalign.conda_env is set. Use the
+  # absolute path to the real binary.
+  conda:      "/path/to/conda"
 
 # -----------------------------------------------------------------------------
 #  GPUs
 # -----------------------------------------------------------------------------
 #  One list, translated into whatever each program expects
-#  (MotionCor3 "-Gpu 0 1", cryoCARE "gpu_id": [0,1], IsoNet "--gpuID 0,1").
+#  (WarpTools CUDA_VISIBLE_DEVICES + --perdevice, IsoNet "--gpuID 0,1").
 gpus: [0, 1]
 
 
@@ -118,12 +129,9 @@ gpus: [0, 1]
 acquisition:
 
   # Unbinned pixel size of the RAW frames, in Angstrom.
-  # "read" -> taken from the mdoc (PixelSpacing), falling back to IMOD 'header'
-  #           on the first raw frame. Set a number here if that is wrong.
-  # as this is often wrong, please input the correct pixel size here!
-  pixel_size: "read"
+  pixel_size: 1
 
-  # Extension of the raw frames: tif, tiff, mrc or eer.
+  # Extension of the raw frames: tif, tiff or eer.
   frame_extension: "tiff"
 
   # Gain reference. Must be .mrc
@@ -131,65 +139,104 @@ acquisition:
   # Leave empty if the frames are already gain corrected.
   gain: ""
 
-  # Constant for the whole dataset. Used by ctffind and written into the
-  # IsoNet star file.
+  # Gain reference orientation, passed to WarpTools create_settings
+  # (--gain_flip_x/--gain_flip_y/--gain_transpose). If unsure, process one
+  # movie without motion correction and try combinations until the gain
+  # pattern disappears from the average.
+  gain_flip_x: false
+  gain_flip_y: false
+  gain_transpose: false
+
+  # Constant for the whole dataset. Passed to WarpTools fs_motion_and_ctf
+  # (--c_voltage/--c_cs/--c_amplitude) for CTF estimation, once, when the
+  # frame series are processed - this is what ts_ctf later refines.
   voltage: 300.0                 # kV
   spherical_aberration: 2.7      # mm
   amplitude_contrast: 0.1
 
 
 # -----------------------------------------------------------------------------
-#  MotionCor3
+#  Frame series   (WarpTools create_settings + fs_motion_and_ctf)
 # -----------------------------------------------------------------------------
-motioncor:
+frameseries:
 
-  # Gain flip. 2 = flip along y. 0 = no flip. See 'MotionCor3 --help'.
-  flip_gain: 2
+  # WarpTools' own log2 Fourier binning of the motion-corrected averages.
+  # 0 = no binning, 1 = bin by 2, 2 = bin by 4, ...
+  bin: 0
 
-  # Fourier binning of the frames. 1 = no binning.
-  # The total binning of the final tomogram is  motioncor.binning * aretomo.binning.
-  binning: 2
-
-  iterations: 7
-  tolerance: 0.5
+  # Dose PER TILT, in e-/A^2. WarpTools needs this explicitly for its own
+  # dose weighting.
+  exposure: 3.0
 
   # Only used when acquisition.frame_extension is "eer".
-  # Leave it empty to omit -FmIntFile entirely.
-  eer_sampling: 1
-  fm_int_file: ""
+  eer_ngroups: ""
 
-  # Appended verbatim to every MotionCor3 call.
+  m_grid: "1x1x3"
+  c_grid: "2x2x1"
+  c_range_max: 7.0
+  c_defocus_max: 8.0
+  c_use_sum: true
+
+  # How many frame series WarpTools processes at once, per GPU.
+  perdevice: 1
+
+  # Appended verbatim to every fs_motion_and_ctf call.
   extra_args: ""
 
 
 # -----------------------------------------------------------------------------
-#  AreTomo2
+#  Tomogram dimensions   (WarpTools create_settings --tomo_dimensions)
+# -----------------------------------------------------------------------------
+#  Wants UNBINNED (raw camera) pixel dimensions.
+# -----------------------------------------------------------------------------
+tomo_dimensions:
+
+  # "auto" -> taken from a frame-series average's own pixel shape, scaled
+  # back up to unbinned. Or set explicitly, e.g. "4400x6000".
+  xy: "auto"
+
+  # Reconstruction thickness in unbinned pixels (same convention as
+  # --tomo_dimensions itself). align_tiltseries converts this to Angstrom
+  # for ts_aretomo3's own --alignz, which wants a thickness in Angstrom, not
+  # pixels.
+  z: 1200
+
+
+# -----------------------------------------------------------------------------
+#  AreTomo   (this pipeline's own external tilt-axis search ONLY)
+# -----------------------------------------------------------------------------
+#  WarpTools' own tilt-series alignment seem currently biased to take the .mdoc
+#  reported tilt-axis in all cases, so it is solved externally instead: 
+#  a few alignment-only AreTomo
+#  runs (executables.aretomo, the SAME build handed to ts_aretomo3 --exe) on
+#  random subsets of tilt series, combined into one dataset-wide angle. The
+#  REAL per-tomogram alignment is then computed by native WarpTools
+#  ts_aretomo3, axis fixed, no further search.
 # -----------------------------------------------------------------------------
 aretomo:
 
-  # Binning applied on top of motioncor.binning.
-  binning: 4
-
-  # Reconstruction thickness in pixels (before AreTomo binning!) (AreTomo2 -VolZ).
-  vol_z: 1200
-
-  # Local (patch) alignment, AreTomo2 syntax. Empty string disables it.
-  local_align: ""
-
-  # Let AreTomo2 refine the tilt axis rotation (-TiltCor 1 / -TiltCor 0).
-  tilt_axis_correction: true
-
   dark_tolerance: 0.1
   wbp: true                      # weighted back projection (-Wbp 1)
-
 
   # --- tilt axis refinement -------------------------------------------------
   # The tilt axis is refined once for the whole dataset and then held fixed.
   # Each iteration aligns a random subset of tilt series, and their tilt axis
   # angles are combined into one robust estimate (see the log).
   #
-  # Set to 0 to disable refinement entirely and align every tilt series
-  # independently.
+  # "" (default): iteration 1 is a free search. Set to a degrees value to
+  # use it as iteration 1's starting point instead (refined within +/-3 deg,
+  # same as every later iteration) - iteration 2 onward is unaffected, still
+  # taking the previous iteration's result as usual.
+  #
+  # With tilt_axis_iterations: 0 below, this value is instead used directly
+  # AS the converged tilt axis, with no external search performed at all -
+  # the opposite of tilt_axis_iterations: 0 with this left empty, which
+  # searches each tomogram independently via ts_aretomo3 instead.
+  initial_tilt_axis: ""
+
+  # Set to 0 to disable refinement entirely and let ts_aretomo3 search every
+  # tilt series' axis independently (unless initial_tilt_axis is set above,
+  # see there).
   tilt_axis_iterations: 3
 
   # Tilt series per refinement iteration. Datasets with fewer than this are
@@ -199,7 +246,7 @@ aretomo:
   # Seed for those random subsets, so a resumed run picks the same ones.
   tilt_axis_seed: 0
 
-  # Appended verbatim to every AreTomo2 call.
+  # Appended verbatim to every (axis-search) AreTomo call.
   extra_args: ""
 
 
@@ -207,53 +254,117 @@ aretomo:
 #  Additional tilt-split half maps
 # -----------------------------------------------------------------------------
 #  Frame splitting ALWAYS happens: reconstructions become
-#  <processing_directory>/raw_halfMaps. That is what cryoCARE and IsoNet use.
+#  <processing_directory>/raw_halfMaps. That is what IsoNet trains on.
 #
-#  Tilt splitting is done IN ADDITION and reuses what the frame-split run
-#  already produced. Only the stack, the .rawtlt and the .aln are split by tilt
-#  number, and AreTomo2 runs once more into its own subdirectory. The result 
-#  lands in <processing_directory>/raw_halfMaps_tiltSplit and is what quality_check
-#  measures with RESOLVE.
+#  Tilt splitting is done IN ADDITION when enabled, and reuses the same
+#  alignment. The result lands in <processing_directory>/raw_halfMaps_tiltSplit
+#  and is what quality_check measures with RESOLVE.
 # -----------------------------------------------------------------------------
 tilt_split:
 
   enabled: true
 
-  # Pixel size in Angstrom aimed for in the tilt-split reconstructions. 
+  # Pixel size in Angstrom aimed for in the tilt-split reconstructions.
   target_pixel_size: 40.0
 
 
 # -----------------------------------------------------------------------------
-#  cryoCARE
+#  WarpTools   (motion_correct / align_tiltseries / reconstruct_tomograms)
 # -----------------------------------------------------------------------------
-#  Written into <processing_directory>/cryocare_config/*.json by
-#  train_cryoCARE / predict_cryoCARE. Delete that directory to regenerate.
+warptools:
+
+  dont_invert: false             # ts_import --dont_invert
+  min_intensity: 0.3             # ts_import --min_intensity
+
+  # Pixel size (A) for ts_stack, this pipeline's own axis-search AreTomo
+  # calls, and native ts_aretomo3 - coarser than the final reconstruction, as
+  # is normal for alignment.
+  align_angpix: 2*pixel_size
+
+  # Final reconstruction pixel size (A), for ts_reconstruct. Also what the
+  # half maps' voxel size is taken to be everywhere downstream (IsoNet, ...).
+  recon_angpix: 10.0
+
+  min_fov: 0                     # ts_aretomo3 --min_fov
+
+  # ts_defocus_hand --check, and apply the fix (--set_flip) automatically if
+  # it reports the handedness is flipped.
+  auto_fix_defocus_hand: true
+
+  ts_ctf_range_high: 7.0 # > 2*align_angpix
+  ts_ctf_defocus_max: 8.0
+
+  # How many tilt series WarpTools reconstructs/aligns at once, per GPU.
+  perdevice: 1
+
+
 # -----------------------------------------------------------------------------
-cryocare:
+#  MissAlignment   (tomo_denoising run_missalignment)
+# -----------------------------------------------------------------------------
+#  Refines each tomogram's ts_aretomo3 alignment with MissAlignment's local,
+#  per-tilt deformation model (modifying warp_tiltseries/<tomo>.xml IN
+#  PLACE - a backup is kept in warp_tiltseries_prealign/), then reconstructs
+#  BOTH the frame-split (for IsoNet) and tilt-split (for RESOLVE) half maps
+#  with WarpTools ts_reconstruct.
+#
+#  Runs by default as part of run_pipe. reconstruct_tomograms always
+#  reconstructs the full tomogram regardless, but by default skips the
+#  (otherwise pointless) pre-MissAlignment half maps when MissAlignment is
+#  about to redo them from the refined alignment - pass run_pipe's
+#  --produce-intermediates to reconstruct both sets of half maps anyway. A
+#  MissAlignment failure stops run_pipe rather than silently falling back.
+#  Pass --skip-missalignment to disable MissAlignment for a run and
+#  reconstruct the uncorrected half maps directly instead, or set
+#  enabled: false here.
+#
+#  Everything lands in <processing_directory>/missalignment/, including two
+#  shared half-map directories (halfMaps/, halfMaps_tiltSplit/) mirroring
+#  raw_halfMaps/raw_halfMaps_tiltSplit. Once populated, IsoNet training/
+#  prediction and quality_check use the MissAlignment-corrected halfMaps(_
+#  tiltSplit)/ instead of raw_halfMaps(_tiltSplit)/ BY DEFAULT - this
+#  preference only checks whether the half maps exist, not how/whether this
+#  run itself produced them.
+#
+#  If it was never run (or enabled: false below) and neither half-map kind
+#  exists yet, running quality_check or IsoNet directly reconstructs
+#  raw_halfMaps(_tiltSplit)/ on demand from the uncorrected alignment.
+# -----------------------------------------------------------------------------
+missalign:
 
-  model_name: "denoise_model"
+  enabled: true
 
-  # --- training data extraction ---
-  patch_shape: [72, 72, 72]
-  num_slices: 1800
-  split: 0.9
-  tilt_axis: "Y"
-  n_normalization_samples: 500
+  # "XxYxZ" (unbinned px, same convention as tomo_dimensions) to tighten the
+  # volume MissAlignment trains against so it does not spend capacity on
+  # empty margins - see MissAlignment's own docs: "the tomogram shape should
+  # tightly fit your sample ... to avoid training on empty regions".
+  # Leave empty (default) to train against the same dimensions as the final
+  # reconstruction (tomo_dimensions).
+  training_volume_dimensions: ""
 
-  # --- network training ---
-  epochs: 100
-  steps_per_epoch: 200
-  batch_size: 16
-  unet_kern_size: 3
-  unet_n_depth: 3
-  unet_n_first: 32
-  learning_rate: 0.0004
+  # Name (or path) of the conda/mamba environment miss-alignment is
+  # installed in, if it lives in a separate one from the rest of the
+  # pipeline. When set, "miss-alignment train" is run via
+  #   conda run -n <env> --no-capture-output ...
+  # Leave empty (default) if executables.missalign is already
+  # directly runnable.
+  conda_env: "/path/to/mambaEnvs/miss-alignment"
 
-  # --- prediction ---
-  # Increase if prediction runs out of GPU memory, e.g. [16, 16, 16].
-  n_tiles: [8, 8, 8]
+  # Assumed VRAM per GPU used for MissAlignment training, in GB. Scales
+  # data_loading.batch_size / tilt_series_alignment.batch_size in the
+  # generated MissAlignment config (MissAlignment's own reference: batch
+  # size 32 for 24 GB cards).
+  gpu_memory_gb: 12
 
-  overwrite: true
+  # Overrides - leave null (the default) to auto-compute training_devices/
+  # reconstruction_devices as roughly half-and-half of the top-level 'gpus'
+  # list. 
+  batch_size: null
+  training_devices: null
+  reconstruction_devices: null
+  dataloaders_per_trainer: null
+
+  # miss-alignment train's --prepare-stacks, in GB of scratch space.
+  prepare_stacks_gb: 10.0
 
 
 # -----------------------------------------------------------------------------
@@ -265,10 +376,17 @@ isonet:
   denoise_epochs: 50
 
   # Epochs for the missing-wedge refinement (step 'refine').
-  refine_epochs: 50
+  refine_epochs: 100
 
-  # CTF handling mode passed to denoise/refine.
-  ctf_mode: "network"
+  # CTF handling mode passed to denoise/refine. "None" (the exact string
+  # IsoNet2's CLI expects) is correct here and should normally stay that
+  # way: the half maps IsoNet trains on are already CTF-corrected by
+  # WarpTools (ts_defocus_hand -> ts_ctf -> ts_reconstruct, run before
+  # IsoNet ever sees them). IsoNet2's other modes ("network"/"wiener"/
+  # "phase_only") each assume RAW, un-CTF-corrected weighted-back-projection
+  # input and apply their own CTF-shaped correction on top of it - using one
+  # of them here would double-correct data that is already corrected.
+  ctf_mode: "None"
 
   # make_mask
   density_percentage: 50
@@ -280,14 +398,14 @@ isonet:
 
   # Fixed tilt range for the missing-wedge model, in degrees, e.g. [-60, 60].
   # NOT RECOMMENDED to fill this in. Empty (default) = tomograms.star gets a
-  # per-tomogram range read from each tomogram's own AreTomo2 .aln, which is
-  # the accurate value (it reflects dropped dark tilts and, if
-  # aretomo.tilt_axis_correction is on, the corrected tilt angles too).
-  # If set, this ONE range is used for every tomogram instead and left
-  # unedited in tomograms.star - only do this if you know it applies to all
-  # of them, e.g. all tomograms share an identical, uncorrected tilt scheme.
+  # per-tomogram range read from each tomogram's own FINAL
+  # warp_tiltseries/<tomo>.xml (never an AreTomo-generated file), which
+  # reflects exactly the tilts WarpTools used (and, once run_missalignment has
+  # run, its in-place refinement too). If set, this ONE range is used for
+  # every tomogram instead and left unedited in tomograms.star - only do this
+  # if you know it applies to all of them.
   fix_tilt_range: []
-  
+
   # Trained networks to use. "auto" picks the most recent network_*.pt from
   # the corresponding IsoNet output directory. Set an explicit file name
   # (relative to <processing_directory>/isonet) to pin a specific network.
@@ -319,23 +437,7 @@ quality_check:
 
   # Populate the mdocs.train directory automatically from the RESOLVE ranking,
   # but ONLY when it does not exist or holds no .mdoc files. Existing training
-  # selections are never touched. 
+  # selections are never touched.
   choose_training_set: true
   min_signal_ratio: 0.35
   outlier_factor: 1.5
-
-
-# -----------------------------------------------------------------------------
-#  CTFFIND4  (defocus estimate for IsoNet, run on the first collected tilt)
-# -----------------------------------------------------------------------------
-#  Run automatically by train_isonet / predict_isonet on the motion-corrected
-#  average of the FIRST tilt of each series. Results are cached as
-#  <processing_directory>/isonet_config/<tomo>_PS.txt and reused if present.
-# -----------------------------------------------------------------------------
-ctffind:
-  box_size: 512
-  min_resolution: 50.0           # Angstrom
-  max_resolution: 5.0            # Angstrom
-  min_defocus: 5000.0            # Angstrom
-  max_defocus: 70000.0           # Angstrom
-  defocus_step: 500.0            # Angstrom

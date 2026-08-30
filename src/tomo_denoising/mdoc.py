@@ -10,6 +10,13 @@ _TILT_ANGLE_RE = re.compile(r"TiltAngle\s*=\s*([-+]?[0-9]*\.?[0-9]+)")
 _PIXEL_SPACING_RE = re.compile(r"PixelSpacing\s*=\s*([0-9]*\.?[0-9]+)")
 _SUBFRAME_RE = re.compile(r"SubFramePath\s*=\s*(.+)")
 
+#: "2*pixel_size" or "pixel_size*2.5" - see resolve_angpix().
+_ANGPIX_MULT_RE = re.compile(
+    r"^\s*(?:(?P<a>[0-9]*\.?[0-9]+)\s*\*\s*pixel_size"
+    r"|pixel_size\s*\*\s*(?P<b>[0-9]*\.?[0-9]+))\s*$",
+    re.IGNORECASE,
+)
+
 #: Extensions that may sit between the tomogram name and ".mdoc",
 #: e.g. "TS_01.mrc.mdoc" or "TS_01.st.mdoc".
 _STACK_SUFFIXES = (".mrc", ".st", ".tif", ".tiff", ".eer", ".ali", ".rec")
@@ -35,8 +42,7 @@ class TiltSeries(object):
     """One tilt series as described by its mdoc file.
 
     ``frames`` and ``angles`` are kept in ACQUISITION order, which is the order
-    the records appear in the mdoc. ``frames[0]`` is therefore the first
-    collected tilt - the one CTFFIND4 is run on for the IsoNet defocus estimate.
+    the records appear in the mdoc.
     """
 
     def __init__(self, mdoc_path, name, frames, angles, pixel_spacing):
@@ -105,12 +111,50 @@ def parse_mdoc(mdoc_path):
     )
 
 
+_ZVALUE_RE = re.compile(r"^\[ZValue\s*=\s*(\d+)\]", re.MULTILINE)
+
+
+def split_mdoc_blocks(text):
+    """Split raw mdoc text into ``(preamble, [block_text, ...])``.
+
+    Each block is one ``[ZValue = N] ... `` section verbatim (up to the next
+    ``[ZValue = ...]`` or end of file), in file order - which is the same
+    order ``parse_mdoc`` builds ``frames``/``angles`` in, so block index i
+    corresponds to ``frames[i]``/``angles[i]``.
+    """
+    matches = list(_ZVALUE_RE.finditer(text))
+    if not matches:
+        return text, []
+    preamble = text[: matches[0].start()]
+    blocks = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        blocks.append(text[start:end])
+    return preamble, blocks
+
+
+def write_filtered_mdoc(source_path, dest_path, keep_indices):
+    """Write a copy of *source_path* keeping only the ZValue blocks whose
+    0-based file-order index is in *keep_indices* - everything else about
+    the file (preamble, per-block content) is preserved verbatim.
+    """
+    with open(source_path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    preamble, blocks = split_mdoc_blocks(text)
+    kept = [block for index, block in enumerate(blocks) if index in keep_indices]
+    with open(dest_path, "w", encoding="utf-8") as handle:
+        handle.write(preamble)
+        handle.write("".join(kept))
+    return dest_path
+
+
 def matches_tomo(text, tomo_name):
     """True when *text* refers to *tomo_name*, and only to that tomogram.
 
     Other programs wrap the tomogram name in prefixes and suffixes of their
-    own - RESOLVE reports ``odd_Position_1_rec_tomo_Tomograms_locRes``, cryoCARE
-    writes ``denoised_Position_1_rec_tomo.mrc`` - so the name is matched as a
+    own - RESOLVE reports ``odd_Position_1_rec_tomo_Tomograms_locRes``, IsoNet
+    writes ``final_Position_1_rec_tomo.mrc`` - so the name is matched as a
     whole underscore-delimited run rather than by stripping known affixes.
 
     The boundaries matter: a plain substring test would let ``Position_1`` match
@@ -185,3 +229,33 @@ def resolve_pixel_size(config, series, first_frame_path=None):
         "one either. Set acquisition.pixel_size to a number in your config."
         % series.name
     )
+
+
+def resolve_angpix(value, reference_apix, key="value"):
+    """Resolve a WarpTools pixel-size config setting.
+
+    *value* is either a plain number, or a simple expression relative to the
+    dataset's own unbinned pixel size (``resolve_pixel_size``'s result,
+    passed in as *reference_apix*): ``"pixel_size"``, ``"2*pixel_size"`` or
+    ``"pixel_size*2.5"``. No general expression evaluation - just these two
+    shapes, matched explicitly rather than via ``eval()``.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+    if text.lower() == "pixel_size":
+        return float(reference_apix)
+
+    match = _ANGPIX_MULT_RE.match(text)
+    if match:
+        multiplier = match.group("a") or match.group("b")
+        return float(multiplier) * float(reference_apix)
+
+    try:
+        return float(text)
+    except ValueError:
+        raise SystemExit(
+            "ERROR: %s must be a number, \"pixel_size\", or an expression "
+            "like \"2*pixel_size\", got %r" % (key, value)
+        )

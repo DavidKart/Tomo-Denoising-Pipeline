@@ -54,7 +54,7 @@ class StepLog(object):
         self.lines.append(text)
 
     def task(self, name, ok, detail=""):
-        """Record the outcome of a sub-task, e.g. MotionCor3 on one tilt series."""
+        """Record the outcome of a sub-task, e.g. ts_reconstruct on one tilt series."""
         bucket = self.tasks.setdefault(name, {"ok": [], "failed": {}})
         if ok:
             bucket["ok"].append(detail or "")

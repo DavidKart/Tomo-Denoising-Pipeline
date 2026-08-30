@@ -1,7 +1,8 @@
 """tomo_denoising - cryo-ET processing and denoising pipeline.
 
-Chains MotionCor3, IMOD newstack, AreTomo2, cryoCARE and IsoNet into a
-reproducible, configuration-driven workflow.
+Chains WarpTools (motion correction, CTF, alignment, reconstruction),
+AreTomo, optional MissAlignment refinement and IsoNet into a reproducible,
+configuration-driven workflow.
 """
 
 __version__ = "1.0.0"

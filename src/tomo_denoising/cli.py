@@ -9,19 +9,23 @@ from .config import DEFAULT_CONFIG_NAME, ConfigError, load_config, write_templat
 from .utils import CommandError, info
 
 DESCRIPTION = """\
-Cryo-ET processing and denoising pipeline.
+Cryo-ET processing and denoising pipeline, built on WarpTools.
 
 Steps, in the order they are normally run:
 
-  create_config      write a commented tomo_denoising_config.yaml to edit
-  create_halfMaps    raw frames -> tomograms + frame/tilt-split half maps
-  quality_check      RESOLVE resolution estimate, training set, results figure
-  train_cryoCARE     train a cryoCARE denoiser on the training tomograms
-  predict_cryoCARE   apply the cryoCARE denoiser to the prediction tomograms
-  train_isonet       CTFFIND4 defocus, prepare_star, denoise, mask, refine
-  predict_isonet     apply the refined IsoNet network
+  create_config         write a commented tomo_denoising_config.yaml to edit
+  motion_correct        WarpTools create_settings + fs_motion_and_ctf
+  align_tiltseries      ts_import, ts_stack, tilt axis search, native
+                        ts_aretomo3 (axis fixed, no search)
+  reconstruct_tomograms ts_defocus_hand, ts_ctf, ts_reconstruct (full
+                        tomogram, frame-split and tilt-split half maps)
+  run_missalignment     MissAlignment-refined reconstruction (on by default;
+                        --skip-missalignment in run_pipe disables it)
+  quality_check         RESOLVE resolution estimate, training set, results figure
+  train_isonet          prepare_star, denoise, mask, refine
+  predict_isonet         apply the refined IsoNet network
 
-  run_pipe           all of the above in one go
+  run_pipe               all of the above in one go
 
 Every step writes a report to <processing_directory>/logs/ and, unless
 overwrite is true, resumes rather than repeats finished work.
@@ -62,42 +66,48 @@ def build_parser():
                         help="overwrite an existing file")
 
     _add_common(sub.add_parser(
-        "create_halfMaps",
-        help="MotionCor3 + newstack + AreTomo2 -> tomograms and half maps"))
+        "motion_correct",
+        help="WarpTools create_settings + fs_motion_and_ctf"))
+
+    _add_common(sub.add_parser(
+        "align_tiltseries",
+        help="ts_import, ts_stack, tilt axis search, native ts_aretomo3"))
+
+    _add_common(sub.add_parser(
+        "reconstruct_tomograms",
+        help="ts_defocus_hand, ts_ctf, ts_reconstruct -> half maps"))
+
+    _add_common(sub.add_parser(
+        "run_missalignment",
+        help="MissAlignment-refined reconstruction (WarpTools + miss-alignment)"))
 
     _add_common(sub.add_parser(
         "quality_check",
         help="RESOLVE resolution estimate, training set and results figure"))
 
-    _add_common(sub.add_parser("train_cryoCARE", help="train cryoCARE"))
-    _add_common(sub.add_parser("predict_cryoCARE",
-                               help="denoise with the trained cryoCARE model"))
-
-    train_in = sub.add_parser(
+    _add_common(sub.add_parser(
         "train_isonet",
-        help="CTFFIND4 defocus, prepare_star, denoise, make_mask and refine")
-    _add_common(train_in)
-    train_in.add_argument("--force-ctf", action="store_true",
-                          help="re-run CTFFIND4 even if a _PS.txt exists")
+        help="prepare_star, denoise, make_mask and refine"))
 
-    predict_in = sub.add_parser("predict_isonet",
-                                help="denoise with the refined IsoNet network")
-    _add_common(predict_in)
-    predict_in.add_argument("--force-ctf", action="store_true",
-                            help="re-run CTFFIND4 even if a _PS.txt exists")
+    _add_common(sub.add_parser(
+        "predict_isonet",
+        help="denoise with the refined IsoNet network"))
 
     pipe = sub.add_parser("run_pipe",
                           help="run the whole pipeline from the configuration")
     _add_common(pipe)
-    pipe.add_argument("--denoiser", choices=["cryocare", "isonet"],
-                      default="cryocare",
-                      help="which denoiser to train and apply "
-                           "(default: cryocare)")
     pipe.add_argument("--skip-quality", action="store_true",
                       help="skip the RESOLVE quality check; requires the "
                            "training mdoc directory to be populated already")
-    pipe.add_argument("--force-ctf", action="store_true",
-                      help="re-run CTFFIND4 even if a _PS.txt exists")
+    pipe.add_argument("--skip-missalignment", action="store_true",
+                      help="skip MissAlignment-refined reconstruction; it "
+                           "runs by default")
+    pipe.add_argument("--produce-intermediates", action="store_true",
+                      help="also reconstruct the pre-MissAlignment "
+                           "frame-split/tilt-split half maps in "
+                           "reconstruct_tomograms, even when MissAlignment "
+                           "will run right after and reconstruct its own "
+                           "(normally skipped there)")
 
     return parser
 
@@ -113,11 +123,11 @@ def _create_config(args):
     print("Edit it - at the very least paths.input_frames,")
     print("paths.processing_directory and the mdocs directories - then run:")
     print("")
-    print("    tomo_denoising run_pipe --denoiser cryocare")
+    print("    tomo_denoising run_pipe")
     print("")
     print("or step by step, starting with:")
     print("")
-    print("    tomo_denoising create_halfMaps")
+    print("    tomo_denoising motion_correct")
     print("")
     return 0
 
@@ -139,43 +149,46 @@ def main(argv=None):
     os.makedirs(config.processing_dir, exist_ok=True)
 
     force = getattr(args, "force", None)
-    force_ctf = getattr(args, "force_ctf", False)
 
     try:
-        if args.command == "create_halfMaps":
-            from . import halfmaps
-            return halfmaps.create_half_maps(config, force=force,
-                                             dry_run=args.dry_run)
+        if args.command == "motion_correct":
+            from . import warptools
+            return warptools.motion_correct(config, force=force,
+                                            dry_run=args.dry_run)
+
+        if args.command == "align_tiltseries":
+            from . import warptools
+            return warptools.align_tiltseries(config, force=force,
+                                              dry_run=args.dry_run)
+
+        if args.command == "reconstruct_tomograms":
+            from . import warptools
+            return warptools.reconstruct_tomograms(config, force=force,
+                                                    dry_run=args.dry_run)
+
+        if args.command == "run_missalignment":
+            from . import missalign
+            return missalign.run(config, force=force, dry_run=args.dry_run)
 
         if args.command == "quality_check":
             from . import resolve
             return resolve.quality_check(config, force=force,
                                          dry_run=args.dry_run)
 
-        if args.command == "train_cryoCARE":
-            from . import cryocare
-            return cryocare.train(config, force=force, dry_run=args.dry_run)
-
-        if args.command == "predict_cryoCARE":
-            from . import cryocare
-            return cryocare.predict(config, force=force, dry_run=args.dry_run)
-
         if args.command == "train_isonet":
             from . import isonet
-            return isonet.train(config, force_ctf=force_ctf, force=force,
-                                dry_run=args.dry_run)
+            return isonet.train(config, force=force, dry_run=args.dry_run)
 
         if args.command == "predict_isonet":
             from . import isonet
-            return isonet.predict(config, force_ctf=force_ctf, force=force,
-                                  dry_run=args.dry_run)
+            return isonet.predict(config, force=force, dry_run=args.dry_run)
 
         if args.command == "run_pipe":
             from . import pipeline
-            return pipeline.run_pipe(config, denoiser=args.denoiser,
-                                     skip_quality=args.skip_quality,
-                                     force=force, force_ctf=force_ctf,
-                                     dry_run=args.dry_run)
+            return pipeline.run_pipe(config, skip_quality=args.skip_quality,
+                                     skip_missalignment=args.skip_missalignment,
+                                     produce_intermediates=args.produce_intermediates,
+                                     force=force, dry_run=args.dry_run)
     except CommandError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 1

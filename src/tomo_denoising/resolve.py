@@ -5,6 +5,10 @@ tilt-split half maps, which is what it needs - two genuinely independent
 reconstructions of the same volume. It writes ``summary.tsv`` with one row per
 tomogram: ``id``, ``median_resolution`` and ``signal_ratio``.
 
+The tilt-split half maps measured are whichever ``halfmap_sets.
+resolve_tiltsplit_halfmaps_dir`` resolves to - MissAlignment's own tilt-split
+half maps when they exist, the plain-WarpTools ones otherwise.
+
 Those numbers are used for two things: choosing a training set when none has
 been picked yet, and captioning the results figure (see :mod:`report`).
 """
@@ -12,6 +16,7 @@ been picked yet, and captioning the results figure (see :mod:`report`).
 import csv
 import os
 
+from .halfmap_sets import ensure_halfmaps_available, resolve_tiltsplit_halfmaps_dir
 from .mdoc import find_mdocs, match_tomo_name, tomo_name_from_mdoc
 from .steplog import StepLog
 from .utils import (
@@ -46,8 +51,8 @@ class Measurement(object):
                                         self.signal_ratio)
 
 
-def summary_path(config):
-    return os.path.join(config.resolve_dir, SUMMARY_NAME)
+def summary_path(config, output_dir=None):
+    return os.path.join(output_dir or config.resolve_dir, SUMMARY_NAME)
 
 
 def known_tomo_names(config):
@@ -56,7 +61,7 @@ def known_tomo_names(config):
             for p in find_mdocs(config.mdoc_dir("preprocessing"))]
 
 
-def read_summary(config, tomo_names=None):
+def read_summary(config, tomo_names=None, output_dir=None):
     """Parse summary.tsv into ``{tomo_name: Measurement}``.
 
     RESOLVE ids carry its own affixes, e.g.
@@ -64,8 +69,13 @@ def read_summary(config, tomo_names=None):
     every possible one, each id is matched against the tomogram names taken
     from the mdocs, as a whole underscore-delimited run - so Position_1 never
     picks up Position_10's row.
+
+    *output_dir* defaults to ``config.resolve_dir``, the only place
+    ``quality_check`` ever writes ``summary.tsv`` - whichever half maps were
+    actually measured (MissAlignment's or the plain ones, see
+    ``halfmap_sets.resolve_tiltsplit_halfmaps_dir``).
     """
-    path = summary_path(config)
+    path = summary_path(config, output_dir)
     if not os.path.isfile(path):
         return {}
 
@@ -115,23 +125,29 @@ def read_summary(config, tomo_names=None):
 # ------------------------------------------------------------------- running
 
 
-def run_resolve(config, log, force=False, dry_run=False):
-    """Run RESOLVE in batch mode over the tilt-split half maps."""
-    inputs = config.tiltsplit_halfmaps_dir
+def run_resolve(config, log, force=False, dry_run=False, input_dir=None,
+                output_dir=None, log_name="resolve.log"):
+    """Run RESOLVE in batch mode over a directory of tilt-split half maps.
+
+    Defaults to the plain-WarpTools ``config.tiltsplit_halfmaps_dir`` ->
+    ``config.resolve_dir``; ``quality_check`` itself always passes
+    *input_dir* explicitly (see ``halfmap_sets.resolve_tiltsplit_halfmaps_dir``).
+    """
+    inputs = input_dir or config.tiltsplit_halfmaps_dir
     if not os.path.isdir(inputs) or not os.listdir(inputs):
         raise SystemExit(
             "ERROR: no tilt-split half maps in %s\n"
             "quality_check measures the tilt-split reconstructions. Set\n"
             "  tilt_split:\n    enabled: true\n"
-            "and run 'tomo_denoising create_halfMaps' first." % inputs
+            "and run 'tomo_denoising reconstruct_tomograms' first." % inputs
         )
 
-    output = ensure_dir(config.resolve_dir)
+    output = ensure_dir(output_dir or config.resolve_dir)
     settings = config["quality_check"]
 
-    if not force and os.path.isfile(summary_path(config)):
+    if not force and os.path.isfile(summary_path(config, output)):
         info("reusing the existing %s (use --force to re-measure)"
-             % summary_path(config))
+             % summary_path(config, output))
         log.note("RESOLVE: reused the existing summary.tsv")
         return True
 
@@ -150,12 +166,12 @@ def run_resolve(config, log, force=False, dry_run=False):
         command += ["--cpu_threads", str(int(settings["cpu_threads"]))]
 
     run(command, cwd=output,
-        log_file=os.path.join(ensure_dir(config.logs_dir), "resolve.log"),
+        log_file=os.path.join(ensure_dir(config.logs_dir), log_name),
         check=False, dry_run=dry_run)
 
     if dry_run:
         return True
-    if not os.path.isfile(summary_path(config)):
+    if not os.path.isfile(summary_path(config, output)):
         log.fail("RESOLVE", "produced no %s in %s" % (SUMMARY_NAME, output))
         return False
     return True
@@ -291,7 +307,11 @@ def quality_check(config, force=None, dry_run=False):
         require_executable(config.exe("resolve"), "RESOLVE")
         banner("RESOLVE quality check")
 
-        if not run_resolve(config, log, force=force, dry_run=dry_run):
+        ensure_halfmaps_available(config, log=log, dry_run=dry_run)
+        inputs = resolve_tiltsplit_halfmaps_dir(config, log=log)
+
+        if not run_resolve(config, log, force=force, dry_run=dry_run,
+                           input_dir=inputs):
             return 1
 
         measurements = read_summary(config)
