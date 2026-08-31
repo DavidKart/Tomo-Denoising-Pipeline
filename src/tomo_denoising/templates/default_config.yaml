@@ -108,7 +108,7 @@ executables:
   aretomo:    "AreTomo3"
   header:     "header"                        # IMOD, pixel-size fallback only
   isonet:     "isonet.py"
-  resolve:    "/path/to/RESOLVE" # quality_check
+  resolve:    "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
   warptools:  "WarpTools"
   missalign:  "miss-alignment"                # run_missalignment
   # Only used if missalign.conda_env is set. Use the
@@ -347,7 +347,7 @@ missalign:
   #   conda run -n <env> --no-capture-output ...
   # Leave empty (default) if executables.missalign is already
   # directly runnable.
-  conda_env: "/path/to/mambaEnvs/miss-alignment"
+  conda_env: ""
 
   # Assumed VRAM per GPU used for MissAlignment training, in GB. Scales
   # data_loading.batch_size / tilt_series_alignment.batch_size in the
