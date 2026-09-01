@@ -22,19 +22,30 @@ XML IN PLACE:
   4. Reconstruct the refined project with genuine ``WarpTools
      ts_reconstruct`` (the shared :func:`warptools.run_ts_reconstruct`) - the
      local grid is only actually applied by Warp's own reconstruction
-     engine, not by AreTomo. Both frame-split (for IsoNet) and tilt-split
-     (for RESOLVE) half maps are produced here - this is the ONLY
-     reconstruction that happens when MissAlignment is part of the pipeline;
-     see :mod:`pipeline`.
+     engine, not by AreTomo. The full tomogram AND both frame-split (for
+     IsoNet) and tilt-split (for RESOLVE) half maps are all produced here -
+     this is the ONLY reconstruction that happens when MissAlignment is part
+     of the pipeline (unless ``--produce-intermediates`` also reconstructed
+     the pre-MissAlignment ones); see :mod:`pipeline`. Written into its own
+     ``missalignment/reconstruction/`` scratch location
+     (``config.missalignment_reconstruction_dir``, passed to
+     ``ts_reconstruct`` as ``--output_processing``) - deliberately NOT the
+     same ``warp_tiltseries/reconstruction/`` ``reconstruct_tomograms``
+     itself uses, since sharing one used to mean this step's reconstruction
+     silently overwrote the physical files raw_halfMaps's symlinks already
+     pointed to.
 
-Everything this step writes beyond ``warp_tiltseries/`` itself lives under
-``<processing_directory>/missalignment/`` and never touches ``raw_halfMaps``
-- those stay exactly as ``reconstruct_tomograms`` left them (or are never
-populated at all, when MissAlignment runs - see :mod:`pipeline`). The two
-symlink directories this step produces (``missalignment/halfMaps``,
-``missalignment/halfMaps_tiltSplit``) are what ``halfmap_sets.
-resolve_frame_halfmaps_dir``/``resolve_tiltsplit_halfmaps_dir`` prefer by
-default for denoising and quality checking.
+Everything this step writes lives under
+``<processing_directory>/missalignment/`` and never touches
+``warp_tiltseries/`` - the uncorrected ``tomograms``/``raw_halfMaps``/
+``raw_halfMaps_tiltSplit`` there stay exactly as ``reconstruct_tomograms``
+left them (or are never populated at all, when MissAlignment runs without
+``--produce-intermediates`` - see :mod:`pipeline`). ``missalignment/`` gets
+the SAME three named directories (``tomograms``, ``raw_halfMaps``,
+``raw_halfMaps_tiltSplit``) - a deliberate analogue of ``warp_tiltseries/``'s
+own layout, just MissAlignment-corrected. The two half-map ones are what
+``halfmap_sets.resolve_frame_halfmaps_dir``/``resolve_tiltsplit_halfmaps_dir``
+prefer by default for denoising and quality checking.
 
 NOTE on the ``ImageDimensionsAngstrom``/``VolumeDimensionsAngstrom`` patch:
 MissAlignment's own reference material (``update_warp_xml.py``) patches
@@ -439,11 +450,14 @@ def _run(config, log, force=False, dry_run=False):
         config, config.warp_tiltseries_settings_path,
         config.missalignment_halfmaps_dir, config.missalignment_tiltsplit_halfmaps_dir,
         config.missalignment_logs_dir, series_names, recon_angpix,
+        config.missalignment_reconstruction_dir,
+        full_dir=config.missalignment_tomograms_dir, do_full=True,
         do_tiltsplit=config.tilt_split, log=log, force=force, dry_run=dry_run,
     )
     if not ok:
         return 1
 
     info("MissAlignment half maps: %s" % config.missalignment_halfmaps_dir)
+    log.note("full tomograms: %s" % config.missalignment_tomograms_dir)
     log.note("half maps: %s" % config.missalignment_halfmaps_dir)
     return 0 if not log.failed else 1

@@ -40,16 +40,19 @@ disables resuming permanently. Every step writes a report to
    skipped by default when MissAlignment is about to run right after (step 5
    reconstructs its own instead) - the full tomogram is reconstructed either
    way. Run on its own, all three are always reconstructed.
-   → `tomograms/`, `raw_halfMaps/`, `raw_halfMaps_tiltSplit/`
+   → `warp_tiltseries/tomograms/`, `warp_tiltseries/raw_halfMaps/`,
+   `warp_tiltseries/raw_halfMaps_tiltSplit/`
 
 5. **`run_missalignment`** *(runs by default as part of `run_pipe`; skip with
    `--skip-missalignment` or `missalign.enabled: false`)* — refines each
    tilt series' alignment in place with MissAlignment's local deformation
-   model, then reconstructs both half-map kinds from the refined alignment.
-   Once populated, its half maps are preferred automatically over
-   `raw_halfMaps*` everywhere downstream. A failure here stops `run_pipe`
-   rather than falling back to the uncorrected alignment silently.
-   → `missalignment/halfMaps*`
+   model, then reconstructs the full tomogram and both half-map kinds from
+   the refined alignment - the same three directories as step 4, just under
+   `missalignment/`. Once populated, its half maps are preferred
+   automatically over `warp_tiltseries/raw_halfMaps*` everywhere downstream.
+   A failure here stops `run_pipe` rather than falling back to the
+   uncorrected alignment silently.
+   → `missalignment/tomograms/`, `missalignment/raw_halfMaps*`
 
 6. **`quality_check`** — runs RESOLVE over the tilt-split half maps (whichever
    are preferred - see step 5) to estimate resolution and signal ratio per

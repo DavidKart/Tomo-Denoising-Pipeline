@@ -10,11 +10,18 @@ Whenever MissAlignment is going to run, it does NOT also reconstruct the
 pre-MissAlignment half maps (``halfmaps=False``) - there is no reason to,
 since ``run_missalignment`` reconstructs its own frame-split (for IsoNet) and
 tilt-split (for RESOLVE) half maps from the refined alignment right after.
-Pass ``--produce-intermediates`` to reconstruct the pre-MissAlignment half
-maps here too, alongside MissAlignment's later corrected ones - useful for
-comparing before/after. When MissAlignment is skipped entirely, the
-plain-WarpTools half maps are always reconstructed here, for
-``quality_check``/IsoNet to use directly.
+Pass ``--produce-intermediates`` to ALSO reconstruct the pre-MissAlignment
+half maps here, alongside MissAlignment's later corrected ones - purely for
+having them on disk to inspect; the two are reconstructed into genuinely
+separate locations (``reconstruct_tomograms`` and ``run_missalignment`` each
+get their own ``--output_processing`` directory), never the same physical
+files under two names. This does NOT change what ``quality_check`` measures:
+RESOLVE is only ever run on the single preferred tilt-split set (MissAlignment's
+once it exists, plain otherwise - see ``halfmap_sets.
+resolve_tiltsplit_halfmaps_dir``), never on the uncorrected one just because
+it happens to exist too, and there is no before/after comparison report. When
+MissAlignment is skipped entirely, the plain-WarpTools half maps are always
+reconstructed here, for ``quality_check``/IsoNet to use directly.
 
 A MissAlignment failure is NOT tolerated: unlike the other steps, silently
 falling back to the uncorrected alignment would be a difficult-to-notice

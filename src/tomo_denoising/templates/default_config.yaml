@@ -16,12 +16,17 @@
 #    tomo_denoising run_pipe
 #    tomo_denoising run_pipe --skip-quality
 #    tomo_denoising run_pipe --skip-missalignment
+#    tomo_denoising run_pipe --produce-intermediates
 #
 #  run_missalignment runs by default as part of run_pipe (pass
 #  --skip-missalignment to disable it). Once its half maps exist (from a
 #  previous run_missalignment, this run or an earlier one), IsoNet and
-#  quality_check's resolution comparison report prefer them automatically -
-#  see the 'missalign' section below.
+#  quality_check prefer them automatically over the uncorrected raw_halfMaps
+#  - see the 'missalign' section below. --produce-intermediates additionally
+#  reconstructs the uncorrected raw_halfMaps(_tiltSplit) alongside
+#  MissAlignment's corrected ones, purely to have both on disk - quality_check
+#  still only ever measures the single preferred set with RESOLVE and never
+#  compares the two.
 #
 #  Every step reads this file. Pass a different one with  -c / --config.
 #  Every step writes a summary to <processing_directory>/logs/.
@@ -59,14 +64,16 @@ paths:
   #     warp_tiltseries.settings / warp_tiltseries/      <- alignment + recon
   #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3)
   #       tiltstack/<tomo>/     ts_stack output
-  #       reconstruction/       ts_reconstruct output
+  #       reconstruction/       ts_reconstruct scratch (--output_processing)
+  #       tomograms/            full, non-split tomograms (always made)
+  #       raw_halfMaps/         every even_/odd_ half map produced
+  #       raw_halfMaps_tiltSplit/  tilt-split half maps, for RESOLVE
   #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
-  #     tomograms/                 <- full, non-split tomograms (always made)
-  #     raw_halfMaps/              <- every even_/odd_ half map produced
-  #     raw_halfMaps_tiltSplit/    <- tilt-split half maps, for RESOLVE
-  #     missalignment/             <- MissAlignment-refined reconstructions +
-  #                                   half maps (halfMaps/, halfMaps_tiltSplit/
-  #                                   - preferred by default once populated)
+  #     missalignment/             <- MissAlignment-refined reconstructions,
+  #                                   the SAME three directories as above
+  #                                   (reconstruction/, tomograms/,
+  #                                   raw_halfMaps/, raw_halfMaps_tiltSplit/)
+  #                                   - preferred by default once populated
   #     isonet_config/    <- the IsoNet star files
   #     isonet/            <- IsoNet working directory (networks, masks, output)
   #
@@ -140,9 +147,7 @@ acquisition:
   gain: ""
 
   # Gain reference orientation, passed to WarpTools create_settings
-  # (--gain_flip_x/--gain_flip_y/--gain_transpose). If unsure, process one
-  # movie without motion correction and try combinations until the gain
-  # pattern disappears from the average.
+  # (--gain_flip_x/--gain_flip_y/--gain_transpose).
   gain_flip_x: false
   gain_flip_y: false
   gain_transpose: false
@@ -253,19 +258,24 @@ aretomo:
 # -----------------------------------------------------------------------------
 #  Additional tilt-split half maps
 # -----------------------------------------------------------------------------
-#  Frame splitting ALWAYS happens: reconstructions become
-#  <processing_directory>/raw_halfMaps. That is what IsoNet trains on.
+#  Frame-split half maps land in warp_tiltseries/raw_halfMaps/ (or
+#  missalignment/raw_halfMaps/, once populated) - that is what IsoNet trains
+#  on. Whether they get reconstructed at all in a given run_pipe run depends
+#  on MissAlignment (see the 'missalign' section below) - they are not
+#  unconditional.
 #
-#  Tilt splitting is done IN ADDITION when enabled, and reuses the same
-#  alignment. The result lands in <processing_directory>/raw_halfMaps_tiltSplit
-#  and is what quality_check measures with RESOLVE.
+#  Tilt splitting is done IN ADDITION when enabled here, reusing the same
+#  alignment. The result lands in warp_tiltseries/raw_halfMaps_tiltSplit/ (or
+#  missalignment/raw_halfMaps_tiltSplit/) and is what quality_check measures
+#  with RESOLVE - whichever of the two is preferred (see halfmap_sets.
+#  resolve_tiltsplit_halfmaps_dir).
 # -----------------------------------------------------------------------------
 tilt_split:
 
   enabled: true
 
   # Pixel size in Angstrom aimed for in the tilt-split reconstructions.
-  target_pixel_size: 40.0
+  target_pixel_size: 25.0
 
 
 # -----------------------------------------------------------------------------
@@ -311,11 +321,13 @@ warptools:
 #  reconstructs the full tomogram regardless, but by default skips the
 #  (otherwise pointless) pre-MissAlignment half maps when MissAlignment is
 #  about to redo them from the refined alignment - pass run_pipe's
-#  --produce-intermediates to reconstruct both sets of half maps anyway. A
-#  MissAlignment failure stops run_pipe rather than silently falling back.
-#  Pass --skip-missalignment to disable MissAlignment for a run and
-#  reconstruct the uncorrected half maps directly instead, or set
-#  enabled: false here.
+#  --produce-intermediates to reconstruct both sets of half maps anyway (in
+#  genuinely separate locations - never the same physical files under two
+#  names), purely to have both on disk - quality_check still only ever
+#  measures the single preferred set with RESOLVE. A MissAlignment failure
+#  stops run_pipe rather than silently falling back. Pass
+#  --skip-missalignment to disable MissAlignment for a run and reconstruct
+#  the uncorrected half maps directly instead, or set enabled: false here.
 #
 #  Everything lands in <processing_directory>/missalignment/, including two
 #  shared half-map directories (halfMaps/, halfMaps_tiltSplit/) mirroring

@@ -342,16 +342,21 @@ class Config(object):
     @property
     def tomograms_dir(self):
         """Full, non-split reconstructions - always produced by
-        reconstruct_tomograms, independent of whether half maps are."""
-        return self.sub("tomograms")
+        reconstruct_tomograms, independent of whether half maps are. Lives
+        under warp_tiltseries/ (not directly under processing_directory) so
+        the layout is the analogue of missalignment_tomograms_dir - both
+        stages produce the same three named directories
+        (tomograms/raw_halfMaps/raw_halfMaps_tiltSplit), one uncorrected,
+        one MissAlignment-corrected."""
+        return self.sub("warp_tiltseries", "tomograms")
 
     @property
     def raw_halfmaps_dir(self):
-        return self.sub("raw_halfMaps")
+        return self.sub("warp_tiltseries", "raw_halfMaps")
 
     @property
     def tiltsplit_halfmaps_dir(self):
-        return self.sub("raw_halfMaps_tiltSplit")
+        return self.sub("warp_tiltseries", "raw_halfMaps_tiltSplit")
 
     @property
     def logs_dir(self):
@@ -436,12 +441,31 @@ class Config(object):
         return self.sub("missalignment")
 
     @property
+    def missalignment_tomograms_dir(self):
+        """MissAlignment's own full, non-split reconstruction - the
+        analogue of tomograms_dir, from the refined alignment instead of the
+        native one."""
+        return self.sub("missalignment", "tomograms")
+
+    @property
     def missalignment_halfmaps_dir(self):
-        return self.sub("missalignment", "halfMaps")
+        return self.sub("missalignment", "raw_halfMaps")
 
     @property
     def missalignment_tiltsplit_halfmaps_dir(self):
-        return self.sub("missalignment", "halfMaps_tiltSplit")
+        return self.sub("missalignment", "raw_halfMaps_tiltSplit")
+
+    @property
+    def missalignment_reconstruction_dir(self):
+        """MissAlignment's own ts_reconstruct scratch location
+        (--output_processing) - deliberately SEPARATE from
+        reconstruction_dir (warp_tiltseries/reconstruction), which
+        reconstruct_tomograms uses for the pre-MissAlignment reconstruction.
+        Sharing one between the two used to mean MissAlignment's later
+        reconstruction silently overwrote the physical files
+        reconstruct_tomograms's own raw_halfMaps symlinks already pointed
+        to."""
+        return self.sub("missalignment", "reconstruction")
 
     @property
     def missalignment_logs_dir(self):

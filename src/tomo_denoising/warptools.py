@@ -31,9 +31,11 @@ Directory layout under ``<processing_directory>``::
     tiltstack/<tomo>/<tomo>.mrc + .rawtlt   ts_stack output
     tiltaxis_search/<tomo>/    OUR OWN scratch alignment-only AreTomo runs -
                                 never mistaken for real project state
-    reconstruction/            ts_reconstruct output (relocated as it's made)
-  raw_halfMaps/                 symlinks - exactly two entries per tomogram
-  raw_halfMaps_tiltSplit/       symlinks - the same, tilt-split (for RESOLVE)
+    reconstruction/            ts_reconstruct scratch (--output_processing;
+                                relocated out as each call finishes)
+    tomograms/                 symlinks - full, non-split tomogram per series
+    raw_halfMaps/               symlinks - exactly two entries per tomogram
+    raw_halfMaps_tiltSplit/     symlinks - the same, tilt-split (for RESOLVE)
 
 ``run_ts_reconstruct`` is also used by :mod:`missalign`, which reconstructs
 the SAME ``warp_tiltseries`` project again after refining its alignment in
@@ -43,11 +45,13 @@ place, into a different destination.
 import glob
 import json
 import os
+import shutil
 import time
 
 from . import tiltaxis
 from .mdoc import (
-    collect_tilt_series, resolve_angpix, resolve_pixel_size, write_filtered_mdoc,
+    collect_tilt_series, match_tomo_name, resolve_angpix, resolve_pixel_size,
+    write_filtered_mdoc,
 )
 from .steplog import StepLog
 from .utils import (
@@ -204,6 +208,22 @@ def _motion_correct(config, log, force=False, dry_run=False):
 # ------------------------------------------------------- frame-series averages
 
 
+def _prefix_boundary_ok(basename, prefix):
+    """True if *basename* starts with *prefix* followed by a non-alphanumeric
+    character, or nothing at all.
+
+    Guards a "prefix*" style match from mistaking *prefix* for a strict
+    prefix of some OTHER, unrelated name that merely happens to start the
+    same way (e.g. "Position_7" is a literal prefix of "Position_7_4" and of
+    "Position_70") - see the (confirmed, in production) bug this exact
+    mistake caused in the reconstruction linking loop below.
+    """
+    if not basename.startswith(prefix):
+        return False
+    rest = basename[len(prefix):]
+    return not rest or not rest[0].isalnum()
+
+
 def frameseries_average_path(config, stem):
     """Location of the motion-corrected average WarpTools wrote for movie
     *stem* (used by ``tomo_dimensions.xy: "auto"`` - see
@@ -227,9 +247,10 @@ def frameseries_average_path(config, stem):
              if "average" in f.replace(os.sep, "/").split("/")]
     if found:
         return found[0]
-    found = sorted(glob.glob(os.path.join(config.warp_frameseries_dir, "**",
-                                          glob.escape(stem) + "*.mrc"),
-                             recursive=True))
+    found = sorted(f for f in glob.glob(
+        os.path.join(config.warp_frameseries_dir, "**", glob.escape(stem) + "*.mrc"),
+        recursive=True)
+        if _prefix_boundary_ok(os.path.basename(f), stem))
     return found[0] if found else None
 
 
@@ -908,11 +929,12 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
 # ============================================================ reconstruct_tomograms
 
 
-def _ts_reconstruct_call(config, settings_path, angpix, half_flag, logs_dir,
-                         log_name, dry_run=False):
+def _ts_reconstruct_call(config, settings_path, angpix, half_flag, output_processing_dir,
+                         logs_dir, log_name, dry_run=False):
     command = [config.exe("warptools"), "ts_reconstruct",
                "--settings", settings_path,
                "--angpix", "%.4f" % angpix,
+               "--output_processing", output_processing_dir,
                "--perdevice", str(int(config["warptools"]["perdevice"]))]
     if half_flag:
         command.append(half_flag)
@@ -921,24 +943,41 @@ def _ts_reconstruct_call(config, settings_path, angpix, half_flag, logs_dir,
                        check=False, dry_run=dry_run)
 
 
-def _relocate_reconstruction_halves(reconstruction_dir, dest_even, dest_odd,
-                                    half_flag, logs_dir, log_name):
-    """Move ts_reconstruct's ``even``/``odd`` output out of the way before the
-    next ts_reconstruct call (the plain, --halfmap_frames and --halfmap_tilts
-    calls all write into the very same ``reconstruction_dir``) can overwrite
-    it.
+def _warp_reconstruction_output_dir(output_processing_dir):
+    """Where ts_reconstruct's own output ACTUALLY lands, given the directory
+    passed to it as ``--output_processing``.
+
+    CONFIRMED against WarpTools' own source (``TiltSeries.cs``:
+    ``ReconstructionDir => Combine(ProcessingDirectoryName, "reconstruction")``,
+    and ``--output_processing`` sets ``ProcessingDirectoryName``) - it always
+    writes into a ``reconstruction`` subdirectory of what it is given, never
+    directly into it. This is exactly what produced the real, observed
+    ``missalignment/reconstruction/reconstruction`` path that first raised
+    the question.
     """
-    even_src = os.path.join(reconstruction_dir, "even")
-    odd_src = os.path.join(reconstruction_dir, "odd")
+    return os.path.join(output_processing_dir, "reconstruction")
+
+
+def _relocate_reconstruction_halves(warp_output_dir, dest_even, dest_odd,
+                                    half_flag, logs_dir, log_name):
+    """Move ts_reconstruct's ``even``/``odd`` output (confirmed location:
+    directly under *warp_output_dir* - see ``TiltSeries.ReconstructionEvenDir``
+    /``ReconstructionOddDir`` in WarpTools' own source, only populated
+    alongside ``--halfmap_frames``/``--halfmap_tilts``) into *dest_even*/
+    *dest_odd*, before the next ts_reconstruct call into the same
+    ``--output_processing`` directory can overwrite them.
+    """
+    even_src = os.path.join(warp_output_dir, "even")
+    odd_src = os.path.join(warp_output_dir, "odd")
     if not os.path.isdir(even_src) or not os.path.isdir(odd_src):
-        found = sorted(glob.glob(os.path.join(reconstruction_dir, "*")))
+        found = sorted(glob.glob(os.path.join(warp_output_dir, "*")))
         raise SystemExit(
             "ERROR: expected %s to hold even/ and odd/ after ts_reconstruct "
             "%s, found: %s\n"
             "ts_reconstruct's real output layout differs from what this "
             "pipeline assumed - check %s and adjust warptools.py's "
             "_relocate_reconstruction_halves."
-            % (reconstruction_dir, half_flag, found,
+            % (warp_output_dir, half_flag, found,
                os.path.join(logs_dir, log_name))
         )
     ensure_dir(dest_even)
@@ -949,37 +988,58 @@ def _relocate_reconstruction_halves(reconstruction_dir, dest_even, dest_odd,
         os.rmdir(src_dir)
 
 
-def _relocate_full_reconstruction(reconstruction_dir, dest_dir, logs_dir, log_name):
-    """Move a plain (non-split) ``ts_reconstruct`` call's output out of
-    ``reconstruction_dir`` and into *dest_dir*, before the next ts_reconstruct
-    call (frame-split or tilt-split half maps) can write into the same
-    directory and collide with it.
-
-    UNCONFIRMED at the time this was written whether a plain call (no
-    --halfmap_* flag) writes its tomogram directly into
-    ``reconstruction_dir`` or into some other layout - collected
-    recursively here so it is found either way, and hard-fails with what was
-    actually there if nothing was produced at all. Verify against the first
-    real run.
+def _discard_reconstruction_byproducts(warp_output_dir):
+    """Remove whatever ts_reconstruct left directly in *warp_output_dir*
+    (a leftover full-tomogram .mrc no one asked to keep, its .png thumbnail)
+    and its ``ctf``/``deconv`` subdirectories - none of these are pipeline
+    deliverables, and leaving them behind risks colliding with (or being
+    mistaken for output of) the NEXT ts_reconstruct call into the same
+    ``--output_processing`` directory.
     """
-    found = [path for path in glob.glob(os.path.join(reconstruction_dir, "**", "*"),
-                                        recursive=True)
-             if os.path.isfile(path)]
-    if not found:
+    if not os.path.isdir(warp_output_dir):
+        return
+    for name in os.listdir(warp_output_dir):
+        path = os.path.join(warp_output_dir, name)
+        if os.path.isfile(path):
+            os.remove(path)
+    for sub in ("ctf", "deconv"):
+        sub_dir = os.path.join(warp_output_dir, sub)
+        if os.path.isdir(sub_dir):
+            shutil.rmtree(sub_dir)
+
+
+def _relocate_full_reconstruction(warp_output_dir, dest_dir, logs_dir, log_name):
+    """Move the full, non-split tomogram(s) ts_reconstruct wrote directly
+    into *warp_output_dir* into *dest_dir*, then discard everything else
+    left there (see :func:`_discard_reconstruction_byproducts`).
+
+    CONFIRMED against WarpTools' own source (``TiltSeries.
+    ReconstructFull.cs``): the full tomogram is written to
+    ``<warp_output_dir>/<name>_<angpix>Apx.mrc`` on EVERY ts_reconstruct
+    call, unconditionally - with or without ``--halfmap_frames``/
+    ``--halfmap_tilts``. Those flags only ADD ``even``/``odd`` output
+    alongside it; they never replace the full tomogram. This is why
+    :func:`run_ts_reconstruct` harvests the full tomogram from the
+    ``--halfmap_frames`` call for free instead of paying for a second,
+    separate reconstruction of the identical volume.
+    """
+    tomograms = [name for name in os.listdir(warp_output_dir)
+                if name.lower().endswith(".mrc")
+                and os.path.isfile(os.path.join(warp_output_dir, name))]
+    if not tomograms:
         raise SystemExit(
-            "ERROR: expected %s to hold the reconstructed tomogram(s) after "
-            "plain ts_reconstruct, found nothing.\n"
+            "ERROR: expected %s to hold the reconstructed tomogram(s) "
+            "directly (ts_reconstruct always writes the full tomogram "
+            "there), found nothing.\n"
             "ts_reconstruct's real output layout differs from what this "
             "pipeline assumed - check %s and adjust warptools.py's "
             "_relocate_full_reconstruction."
-            % (reconstruction_dir, os.path.join(logs_dir, log_name))
+            % (warp_output_dir, os.path.join(logs_dir, log_name))
         )
     ensure_dir(dest_dir)
-    for path in found:
-        os.replace(path, os.path.join(dest_dir, os.path.basename(path)))
-    for root, _dirs, _files in os.walk(reconstruction_dir, topdown=False):
-        if root != reconstruction_dir and not os.listdir(root):
-            os.rmdir(root)
+    for name in tomograms:
+        os.replace(os.path.join(warp_output_dir, name), os.path.join(dest_dir, name))
+    _discard_reconstruction_byproducts(warp_output_dir)
 
 
 def resolve_recon_angpix(config, log=None):
@@ -998,7 +1058,8 @@ def resolve_recon_angpix(config, log=None):
 
 
 def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_dir,
-                       logs_dir, series_names, angpix, full_dir=None, do_full=False,
+                       logs_dir, series_names, angpix, reconstruction_dir,
+                       full_dir=None, do_full=False,
                        do_halfmaps=True, do_tiltsplit=True, log=None,
                        force=False, dry_run=False):
     """Reconstruct the full, non-split tomogram (when *do_full*), frame-split
@@ -1016,17 +1077,40 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
     and the frame-split half maps both use it; the tilt-split half maps use
     the coarser ``tilt_split.target_pixel_size`` instead (see below).
 
-    Shared by :func:`reconstruct_tomograms` (``do_full=True``, *do_halfmaps*
+    *reconstruction_dir* is passed to every ``ts_reconstruct`` call as
+    ``--output_processing`` - the ephemeral scratch location its raw output
+    lands in (one level deeper, in ``<reconstruction_dir>/reconstruction/``
+    - see :func:`_warp_reconstruction_output_dir`) before relocation into
+    *full_dir*/*halfmaps_dir*/*tiltsplit_halfmaps_dir*. Shared by
+    :func:`reconstruct_tomograms` (``do_full=True``, *do_halfmaps*
     controlled by its own ``halfmaps``/``--produce-intermediates`` logic -
-    see :mod:`pipeline`) and :mod:`missalign` (``do_full=False``,
+    see :mod:`pipeline`) and :mod:`missalign` (also ``do_full=True``,
     *do_halfmaps* always true), which reconstruct the SAME
     ``warp_tiltseries`` project (before and after MissAlignment refines its
-    alignment in place) into different destination directories - resume is
-    decided from the DESTINATION directories, not the ephemeral
-    ``reconstruction/`` intermediate, since that is emptied by the
-    relocation step right after every call.
+    alignment in place). The two callers MUST pass DIFFERENT
+    *reconstruction_dir* values (``config.reconstruction_dir`` vs
+    ``config.missalignment_reconstruction_dir``) - they used to share one,
+    which meant MissAlignment's later reconstruction silently overwrote the
+    files reconstruct_tomograms's own raw_halfMaps symlinks already pointed
+    to, corrupting them in place. Resume is decided from the DESTINATION
+    directories, not this ephemeral intermediate, since that is emptied by
+    the relocation step right after every call.
+
+    CONFIRMED against WarpTools' own source (``TiltSeries.
+    ReconstructFull.cs``): the full, non-split tomogram is written
+    unconditionally on EVERY ts_reconstruct call, with or without
+    ``--halfmap_frames``/``--halfmap_tilts`` - those flags only ADD
+    even/odd output alongside it, at no extra cost to the full tomogram.
+    So when *do_full* and *do_halfmaps* are BOTH wanted, the full tomogram
+    is harvested as a free byproduct of the ``--halfmap_frames`` call
+    (same ``angpix``) instead of paying for a second, separate
+    reconstruction of the identical volume. A dedicated plain call (no
+    half-map flag at all) is only made when *do_full* is wanted WITHOUT
+    *do_halfmaps* - there is then no halfmap call to harvest it from, and
+    a plain call skips the (otherwise unwanted) even/odd compute entirely.
     """
-    reconstruction_dir = ensure_dir(config.reconstruction_dir)
+    reconstruction_dir = ensure_dir(reconstruction_dir)
+    warp_output_dir = _warp_reconstruction_output_dir(reconstruction_dir)
     ensure_dir(logs_dir)
     if do_full:
         ensure_dir(full_dir)
@@ -1041,11 +1125,14 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
     tilt_even_dst = os.path.join(reconstruction_dir, "tilt_even")
     tilt_odd_dst = os.path.join(reconstruction_dir, "tilt_odd")
 
+    plain_full_call = do_full and not do_halfmaps
+    harvest_full_from_frame_call = do_full and do_halfmaps
+
     have_full = do_full and _has_any_files(full_dir)
-    if do_full and (force or not have_full):
+    if plain_full_call and (force or not have_full):
         code = _ts_reconstruct_call(config, settings_path, angpix, None,
-                                    logs_dir, "ts_reconstruct_full.log",
-                                    dry_run=dry_run)
+                                    reconstruction_dir, logs_dir,
+                                    "ts_reconstruct_full.log", dry_run=dry_run)
         if not dry_run:
             if code != 0:
                 if log:
@@ -1053,18 +1140,19 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
                             "exit status %d" % code)
                 return False
             _relocate_full_reconstruction(
-                reconstruction_dir, full_scratch, logs_dir,
+                warp_output_dir, full_scratch, logs_dir,
                 "ts_reconstruct_full.log")
         if log:
             log.task("ts_reconstruct (full tomogram)", True, "-")
-    elif do_full and log:
+    elif plain_full_call and log:
         log.note("full tomograms already present in %s - skipping" % full_dir)
 
     have_frame = do_halfmaps and _has_any_files(halfmaps_dir)
     if do_halfmaps and (force or not have_frame):
         code = _ts_reconstruct_call(config, settings_path, angpix,
-                                    "--halfmap_frames", logs_dir,
-                                    "ts_reconstruct_frame.log", dry_run=dry_run)
+                                    "--halfmap_frames", reconstruction_dir,
+                                    logs_dir, "ts_reconstruct_frame.log",
+                                    dry_run=dry_run)
         if not dry_run:
             if code != 0:
                 if log:
@@ -1072,8 +1160,22 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
                             "exit status %d" % code)
                 return False
             _relocate_reconstruction_halves(
-                reconstruction_dir, frame_even_dst, frame_odd_dst,
+                warp_output_dir, frame_even_dst, frame_odd_dst,
                 "--halfmap_frames", logs_dir, "ts_reconstruct_frame.log")
+            if harvest_full_from_frame_call and (force or not have_full):
+                _relocate_full_reconstruction(
+                    warp_output_dir, full_scratch, logs_dir,
+                    "ts_reconstruct_frame.log")
+                if log:
+                    log.note("full tomogram harvested from the "
+                             "--halfmap_frames call (same reconstruction, "
+                             "no separate pass)")
+            else:
+                _discard_reconstruction_byproducts(warp_output_dir)
+                if harvest_full_from_frame_call and log:
+                    log.note("full tomograms already present in %s - "
+                             "discarded this call's redundant duplicate"
+                             % full_dir)
         if log:
             log.task("ts_reconstruct (frame halves)", True, "-")
     elif do_halfmaps and log:
@@ -1097,8 +1199,9 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
             log.note("tilt-split recon_angpix: %.4f A (tilt_split.target_pixel_size)"
                      % tiltsplit_angpix)
         code = _ts_reconstruct_call(config, settings_path, tiltsplit_angpix,
-                                    "--halfmap_tilts", logs_dir,
-                                    "ts_reconstruct_tilt.log", dry_run=dry_run)
+                                    "--halfmap_tilts", reconstruction_dir,
+                                    logs_dir, "ts_reconstruct_tilt.log",
+                                    dry_run=dry_run)
         if not dry_run:
             if code != 0:
                 if log:
@@ -1106,8 +1209,12 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
                             "exit status %d" % code)
                 return False
             _relocate_reconstruction_halves(
-                reconstruction_dir, tilt_even_dst, tilt_odd_dst,
+                warp_output_dir, tilt_even_dst, tilt_odd_dst,
                 "--halfmap_tilts", logs_dir, "ts_reconstruct_tilt.log")
+            # This call's own full-tomogram byproduct is at the coarser
+            # tilt_split angpix, not the fine recon_angpix tomograms_dir is
+            # meant to hold - discard rather than keep a second, wrong one.
+            _discard_reconstruction_byproducts(warp_output_dir)
         if log:
             log.task("ts_reconstruct (tilt halves)", True, "-")
     elif do_halfmaps and do_tiltsplit and log:
@@ -1127,20 +1234,46 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
             sources += [(tilt_even_dst, "even", tiltsplit_halfmaps_dir),
                        (tilt_odd_dst, "odd", tiltsplit_halfmaps_dir)]
 
+    # Ownership is resolved with mdoc.match_tomo_name (whole underscore-
+    # delimited run, longest name wins) rather than a "*name*" substring
+    # glob - a real production bug (confirmed: "Position_7"'s glob matched
+    # "Position_7_4"'s reconstructed file too, and glob's unordered listing
+    # meant whichever of the two happened to sort first silently became BOTH
+    # tomograms' symlink target) showed a plain substring test is not safe
+    # whenever one tilt series' name is a literal prefix of another's - a
+    # routine occurrence with numeric position naming (Position_7 vs
+    # Position_7_4 vs Position_70-79, ...), not a rare edge case.
     linked = 0
-    for name in series_names:
-        for src_dir, half, dst_dir in sources:
-            if not os.path.isdir(src_dir):
+    matched_names = set()
+    for src_dir, half, dst_dir in sources:
+        if not os.path.isdir(src_dir):
+            continue
+        for entry in sorted(os.listdir(src_dir)):
+            source = os.path.join(src_dir, entry)
+            if not os.path.isfile(source):
                 continue
-            for source in glob.glob(os.path.join(src_dir, "*%s*" % glob.escape(name))):
-                target_name = ("%s_%s_rec_tomo.mrc" % (half, name) if half
-                               else "%s_rec_tomo.mrc" % name)
-                target = os.path.join(dst_dir, target_name)
-                link_file(source, target)
-                linked += 1
-        if log:
-            log.ok(name)
+            owner = match_tomo_name(entry, series_names)
+            if owner is None:
+                warn("%s: %r does not match any of this run's tilt series "
+                     "by name - not linked. If this is a real result, check "
+                     "why its tilt series is missing from series_names."
+                     % (src_dir, entry))
+                continue
+            target_name = ("%s_%s_rec_tomo.mrc" % (half, owner) if half
+                           else "%s_rec_tomo.mrc" % owner)
+            target = os.path.join(dst_dir, target_name)
+            link_file(source, target)
+            linked += 1
+            matched_names.add(owner)
+
     if log:
+        for name in series_names:
+            if name in matched_names:
+                log.ok(name)
+            else:
+                log.fail(name, "no reconstructed output matched this series "
+                         "in any of: %s"
+                         % ", ".join(sorted({s for s, _, _ in sources})))
         log.note("linked %d file(s)" % linked)
     return True
 
@@ -1254,6 +1387,7 @@ def _reconstruct_tomograms(config, log, force=False, dry_run=False, halfmaps=Tru
     ok = run_ts_reconstruct(
         config, settings_path, config.raw_halfmaps_dir,
         config.tiltsplit_halfmaps_dir, logs, series_names, recon_angpix,
+        config.reconstruction_dir,
         full_dir=config.tomograms_dir, do_full=True,
         do_halfmaps=halfmaps, do_tiltsplit=config.tilt_split,
         log=log, force=force, dry_run=dry_run,
