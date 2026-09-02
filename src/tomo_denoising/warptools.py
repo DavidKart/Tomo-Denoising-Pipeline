@@ -386,8 +386,42 @@ def find_aln(stack_path, *search_dirs):
     return None
 
 
+def resolve_alignz_angstrom(config, apix, log=None):
+    """Physical alignment thickness in Angstrom from ``aretomo.alignz``, or
+    ``None`` when it is left empty.
+
+    ``aretomo.alignz`` is a SEPARATE value from ``tomo_dimensions.z`` on
+    purpose - the volume worth aligning on is not the volume worth
+    reconstructing - but shares its unit: UNBINNED pixels. It is resolved to
+    a physical thickness here, once, because its two consumers want
+    different units for the same quantity:
+
+      * ``WarpTools ts_aretomo3 --alignz`` - ANGSTROM (an integer field).
+      * ``AreTomo3 -AlignZ`` (this pipeline's own axis-search calls) -
+        PIXELS at the input stack's own pixel size, i.e. ``align_angpix``.
+
+    Empty (the default) means neither call is given the argument at all,
+    leaving each tool at its own default.
+    """
+    raw = str(config["aretomo"]["alignz"] or "").strip()
+    if not raw:
+        return None
+    try:
+        unbinned_px = float(raw)
+    except ValueError:
+        raise SystemExit(
+            "ERROR: aretomo.alignz must be a number of unbinned pixels (or "
+            "empty to leave it unset), got %r" % raw
+        )
+    angstrom = unbinned_px * apix
+    if log is not None:
+        log.note("alignz: %g unbinned px -> %.1f A (unbinned pixel size "
+                 "%.4f A)" % (unbinned_px, angstrom, apix))
+    return angstrom
+
+
 def _axis_search_align(config, name, stack, align_angpix, tilt_axis,
-                       refine, iteration, dry_run=False):
+                       refine, iteration, alignz_px=None, dry_run=False):
     """One alignment-only (``-VolZ 0``) AreTomo3 run, for the tilt axis search.
 
     Writes into ``tiltaxis_search/<name>/`` (``-OutDir``) - never into
@@ -404,6 +438,11 @@ def _axis_search_align(config, name, stack, align_angpix, tilt_axis,
                "-InPrefix", stack, "-OutDir", out_dir + os.sep,
                "-PixSize", "%.4f" % align_angpix,
                "-VolZ", "0", "-DarkTol", str(aretomo["dark_tolerance"])]
+    # -AlignZ is in PIXELS at this stack's own pixel size (align_angpix),
+    # unlike ts_aretomo3's --alignz, which wants Angstrom - see
+    # resolve_alignz_angstrom. Omitted entirely when aretomo.alignz is empty.
+    if alignz_px is not None:
+        command += ["-AlignZ", str(alignz_px)]
     if aretomo["wbp"]:
         command += ["-Wbp", "1"]
     if tilt_axis is not None:
@@ -418,8 +457,8 @@ def _axis_search_align(config, name, stack, align_angpix, tilt_axis,
     return out_dir, log_file
 
 
-def refine_tilt_axis(config, series_names, align_angpix, log, force=False,
-                     dry_run=False):
+def refine_tilt_axis(config, series_names, align_angpix, log,
+                     alignz_angstrom=None, force=False, dry_run=False):
     """Determine one tilt axis for the whole dataset (see :mod:`tiltaxis`).
 
     Returns the converged angle, or ``None`` when refinement is disabled and
@@ -433,6 +472,12 @@ def refine_tilt_axis(config, series_names, align_angpix, log, force=False,
     taking the previous iteration's result as usual. With
     ``tilt_axis_iterations: 0`` it is instead used directly AS the converged
     angle, with no external search performed at all.
+
+    *alignz_angstrom* is the already-resolved ``aretomo.alignz`` thickness
+    (see :func:`resolve_alignz_angstrom`), converted here to PIXELS at the
+    input stacks' own pixel size - which is what ``AreTomo3 -AlignZ`` wants,
+    unlike ts_aretomo3's Angstrom-valued ``--alignz``. ``None`` leaves the
+    argument off entirely.
     """
     iterations = int(config["aretomo"]["tilt_axis_iterations"])
     initial_raw = str(config["aretomo"]["initial_tilt_axis"] or "").strip()
@@ -495,6 +540,12 @@ def refine_tilt_axis(config, series_names, align_angpix, log, force=False,
     banner("Tilt axis refinement (%d iterations, %d tilt series each)"
            % (iterations, min(subset_size, len(series_names))))
 
+    alignz_px = (None if alignz_angstrom is None
+                 else int(round(alignz_angstrom / align_angpix)))
+    if alignz_px is not None:
+        info("AreTomo3 -AlignZ %d px (at the %.4f A stack pixel size)"
+             % (alignz_px, align_angpix))
+
     rows = []
     angle = initial_angle
     measured = False
@@ -512,7 +563,7 @@ def refine_tilt_axis(config, series_names, align_angpix, log, force=False,
             _, log_file = _axis_search_align(
                 config, name, stack, align_angpix,
                 tilt_axis=angle, refine=0 if angle is not None else -1,
-                iteration=iteration, dry_run=dry_run)
+                iteration=iteration, alignz_px=alignz_px, dry_run=dry_run)
             if dry_run:
                 measurements[name] = None
                 continue
@@ -864,8 +915,11 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
 
     # --- 4. tilt axis refinement (tiltaxis.py, unchanged algorithm) -------
     banner("align_tiltseries 4/5  tilt axis refinement")
+    alignz_angstrom = resolve_alignz_angstrom(config, apix, log=log)
+
     if need_alignment:
         converged = refine_tilt_axis(config, series_names, align_angpix, log,
+                                     alignz_angstrom=alignz_angstrom,
                                      force=force, dry_run=dry_run)
     else:
         converged = None
@@ -884,23 +938,21 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
                        check=False, dry_run=dry_run)
             log.note("re-imported with OVERRIDE_AXIS %+.4f deg" % converged)
 
-        # --alignz wants the alignment thickness in ANGSTROM, not pixels -
-        # tomo_dimensions.z is unbinned PIXELS (same convention as
-        # --tomo_dimensions itself), so it is scaled by the unbinned pixel
-        # size here. Passing the raw pixel count would silently hand
-        # ts_aretomo3 a wildly wrong thickness. It is also an INTEGER field
-        # (the reference script's own ARETOMO_ALIGNZ=2000 has no decimal,
-        # same pattern as --c_voltage) - a decimal value fails its parser.
-        alignz_angstrom = int(round(float(config["tomo_dimensions"]["z"]) * apix))
         command = [
             config.exe("warptools"), "ts_aretomo3",
             "--settings", settings_path,
             "--exe", config.exe("aretomo"),
             "--angpix", "%.4f" % align_angpix,
-            "--alignz", str(alignz_angstrom),
             "--min_fov", str(int(wt["min_fov"])),
             "--perdevice", str(int(wt["perdevice"])),
         ]
+        # --alignz wants the thickness in ANGSTROM (unlike AreTomo3's own
+        # -AlignZ, which is in stack pixels - see resolve_alignz_angstrom),
+        # and it is an INTEGER field (same pattern as --c_voltage; a decimal
+        # value fails its parser). Omitted entirely when aretomo.alignz is
+        # empty, leaving ts_aretomo3 at its own default.
+        if alignz_angstrom is not None:
+            command += ["--alignz", str(int(round(alignz_angstrom)))]
         if converged is not None:
             command += ["--axis", "%.4f" % converged, "--axis_iter", "0"]
         code = run_command(command, cwd=config.processing_dir, env=env,

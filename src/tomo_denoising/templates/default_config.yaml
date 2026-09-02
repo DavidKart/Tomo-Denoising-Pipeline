@@ -201,14 +201,12 @@ tomo_dimensions:
   xy: "auto"
 
   # Reconstruction thickness in unbinned pixels (same convention as
-  # --tomo_dimensions itself). align_tiltseries converts this to Angstrom
-  # for ts_aretomo3's own --alignz, which wants a thickness in Angstrom, not
-  # pixels.
+  # --tomo_dimensions itself).
   z: 1200
 
 
 # -----------------------------------------------------------------------------
-#  AreTomo   (this pipeline's own external tilt-axis search ONLY)
+#  AreTomo   (mostly this pipeline's own external tilt-axis search)
 # -----------------------------------------------------------------------------
 #  WarpTools' own tilt-series alignment seem currently biased to take the .mdoc
 #  reported tilt-axis in all cases, so it is solved externally instead: 
@@ -217,11 +215,26 @@ tomo_dimensions:
 #  random subsets of tilt series, combined into one dataset-wide angle. The
 #  REAL per-tomogram alignment is then computed by native WarpTools
 #  ts_aretomo3, axis fixed, no further search.
+#
+#  Everything here applies to those external calls only - EXCEPT alignz,
+#  which is handed to native ts_aretomo3 as well (see there).
 # -----------------------------------------------------------------------------
 aretomo:
 
   dark_tolerance: 0.1
   wbp: true                      # weighted back projection (-Wbp 1)
+
+  # Alignment thickness in UNBINNED pixels - the same unit as
+  # tomo_dimensions.z.
+  #
+  # One value, fed to both consumers, each converted to the unit it wants:
+  #   - WarpTools ts_aretomo3 --alignz : ANGSTROM (unbinned px x pixel size)
+  #   - AreTomo3 -AlignZ (the tilt-axis iterations below) : PIXELS at the
+  #     input stack's own pixel size (warptools.align_angpix)
+  #
+  # "" (default): neither call is given the argument at all, leaving to
+  # be solved by AreTomo3 internally.
+  alignz: ""
 
   # --- tilt axis refinement -------------------------------------------------
   # The tilt axis is refined once for the whole dataset and then held fixed.

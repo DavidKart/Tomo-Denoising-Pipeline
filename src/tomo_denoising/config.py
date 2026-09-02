@@ -78,11 +78,20 @@ DEFAULTS = {
         "z": 1200,
     },
     "aretomo": {
-        # Only used for OUR OWN external, alignment-only tilt-axis-search
-        # calls (tiltaxis.py) - the real per-tomogram alignment runs through
-        # native WarpTools ts_aretomo3 instead (see the warptools section).
+        # Mostly for OUR OWN external, alignment-only tilt-axis-search calls
+        # (tiltaxis.py) - the real per-tomogram alignment runs through native
+        # WarpTools ts_aretomo3 instead (see the warptools section). "alignz"
+        # is the exception: it feeds BOTH.
         "dark_tolerance": 0.5,
         "wbp": True,
+        # Alignment thickness in UNBINNED pixels (same convention as
+        # tomo_dimensions, but deliberately a SEPARATE value - the volume
+        # worth aligning on is not the volume worth reconstructing). Fed to
+        # both consumers, each in the units it wants: WarpTools
+        # ts_aretomo3 --alignz in ANGSTROM, our own AreTomo3 -AlignZ in
+        # pixels at the input stack's own pixel size (align_angpix).
+        # "" (default) -> neither call gets the argument at all.
+        "alignz": "",
         # "" (default) -> the first iteration is a free search. Set to a
         # degrees value to use it as the starting point for iteration 1
         # instead (refined within +/-3 deg, same as every later iteration);
