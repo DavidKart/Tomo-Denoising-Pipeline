@@ -117,7 +117,7 @@ executables:
   isonet:     "isonet.py"
   resolve:    "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
   warptools:  "WarpTools"
-  missalign:  "miss-alignment"                # run_missalignment
+  missalign:  "/opt/Tomo-Denoising-Pipeline/bin/miss-alignment"                # run_missalignment
   # Only used if missalign.conda_env is set. Use the
   # absolute path to the real binary.
   conda:      "/path/to/conda"
@@ -178,8 +178,8 @@ frameseries:
 
   m_grid: "1x1x3"
   c_grid: "2x2x1"
-  c_range_max: 7.0
-  c_defocus_max: 8.0
+  c_range_max: 7.0 # max res for CTF fit. Must be > Nyq of motion-corrected averages.
+  c_defocus_max: 8.0 # max defocus to be considered
   c_use_sum: true
 
   # How many frame series WarpTools processes at once, per GPU.
@@ -314,8 +314,8 @@ warptools:
   # it reports the handedness is flipped.
   auto_fix_defocus_hand: true
 
-  ts_ctf_range_high: 7.0 # > 2*align_angpix
-  ts_ctf_defocus_max: 8.0
+  ts_ctf_range_high: 7.0 # needs be > 2*align_angpix
+  ts_ctf_defocus_max: 8.0 # max defocus to be considered
 
   # How many tilt series WarpTools reconstructs/aligns at once, per GPU.
   perdevice: 1

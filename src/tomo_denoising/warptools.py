@@ -50,8 +50,8 @@ import time
 
 from . import tiltaxis
 from .mdoc import (
-    collect_tilt_series, match_tomo_name, resolve_angpix, resolve_pixel_size,
-    write_filtered_mdoc,
+    collect_tilt_series, match_tomo_name, pixel_size_is_read, resolve_angpix,
+    resolve_pixel_size, write_filtered_mdoc,
 )
 from .steplog import StepLog
 from .utils import (
@@ -127,7 +127,15 @@ def _motion_correct(config, log, force=False, dry_run=False):
     log.note("%d tilt series found in %s" % (len(series_list), directory))
 
     apix = dataset_apix(config, series_list)
-    log.note("unbinned pixel size: %.4f A (from %s)" % (apix, series_list[0].name))
+    # Name the source the value ACTUALLY came from - crediting the first tilt
+    # series unconditionally made an explicitly configured pixel size look
+    # like it had been read from that mdoc.
+    if pixel_size_is_read(config):
+        log.note("unbinned pixel size: %.4f A (read from %s)"
+                 % (apix, series_list[0].name))
+    else:
+        log.note("unbinned pixel size: %.4f A (acquisition.pixel_size, set "
+                 "explicitly in %s)" % (apix, config.source))
 
     acquisition = config["acquisition"]
     extension = acquisition["frame_extension"]

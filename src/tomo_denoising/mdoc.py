@@ -198,6 +198,18 @@ def collect_tilt_series(directory, label):
     return series
 
 
+def pixel_size_is_read(config):
+    """True when ``acquisition.pixel_size`` says to READ the value from the
+    data rather than use a number given in the config.
+
+    Kept next to (and used by) :func:`resolve_pixel_size` so the two can
+    never disagree about which source is actually in play - a log line that
+    names the wrong source is worse than no log line at all.
+    """
+    setting = config["acquisition"]["pixel_size"]
+    return isinstance(setting, str) and setting.strip().lower() == "read"
+
+
 def resolve_pixel_size(config, series, first_frame_path=None):
     """Determine the unbinned pixel size in Angstrom for one tilt series.
 
@@ -205,9 +217,8 @@ def resolve_pixel_size(config, series, first_frame_path=None):
     back to IMOD ``header`` on the first raw frame. Anything else is taken
     as a literal number.
     """
-    setting = config["acquisition"]["pixel_size"]
-    if not (isinstance(setting, str) and setting.strip().lower() == "read"):
-        return float(setting)
+    if not pixel_size_is_read(config):
+        return float(config["acquisition"]["pixel_size"])
 
     if series.pixel_spacing:
         return float(series.pixel_spacing)
