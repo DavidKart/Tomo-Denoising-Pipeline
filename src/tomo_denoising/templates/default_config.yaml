@@ -288,7 +288,7 @@ tilt_split:
   enabled: true
 
   # Pixel size in Angstrom aimed for in the tilt-split reconstructions.
-  target_pixel_size: 25.0
+  target_pixel_size: 50.0
 
 
 # -----------------------------------------------------------------------------
