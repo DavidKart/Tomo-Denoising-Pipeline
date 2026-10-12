@@ -244,8 +244,7 @@ acquisition:
   # Unbinned pixel size of the RAW frames, in Angstrom.
   pixel_size: 1
 
-  # Extension of the raw frames: tif, tiff, eer or mrc (for mrc, see the note
-  # on paths.input_frames).
+  # Extension of the raw frames: tif, tiff, eer or mrc.
   frame_extension: "tiff"
 
   # Gain reference. Must be .mrc
