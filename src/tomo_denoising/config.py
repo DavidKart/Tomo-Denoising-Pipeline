@@ -65,7 +65,7 @@ DEFAULTS = {
     "gpus": [0, 1],
     "acquisition": {
         "pixel_size": "read",
-        "frame_extension": "tiff",         # tif/tiff/eer
+        "frame_extension": "tiff",         # tif/tiff/eer/mrc
         "gain": "",
         "gain_flip_x": False,
         "gain_flip_y": False,
@@ -439,9 +439,9 @@ class Config(object):
             )
 
         ext = str(self.data["acquisition"]["frame_extension"]).lower().lstrip(".")
-        if ext not in ("tif", "tiff", "eer"):
+        if ext not in ("tif", "tiff", "eer", "mrc"):
             raise ConfigError(
-                "acquisition.frame_extension must be one of tif/tiff/eer, "
+                "acquisition.frame_extension must be one of tif/tiff/eer/mrc, "
                 "got %r" % ext
             )
         self.data["acquisition"]["frame_extension"] = ext

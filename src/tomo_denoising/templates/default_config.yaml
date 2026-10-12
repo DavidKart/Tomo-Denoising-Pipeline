@@ -64,9 +64,13 @@ overwrite: false
 # -----------------------------------------------------------------------------
 paths:
 
-  # Directory holding the RAW movie frames (.tif / .tiff / .eer) and the gain
-  # reference. This directory is only ever READ FROM - nothing is written
-  # here. The file names are taken from the SubFramePath entries of the mdocs.
+  # Directory holding the RAW movie frames (.tif / .tiff / .eer / .mrc) and
+  # the gain reference. This directory is only ever READ FROM - nothing is
+  # written here. The file names are taken from the SubFramePath entries of
+  # the mdocs.
+  # With .mrc frames, keep ONLY the movies here: WarpTools treats every *.mrc
+  # in this directory as a movie - including an .mrc gain reference or
+  # SerialEM's tilt-series stacks. Put those somewhere else.
   input_frames: "frames"
 
   # Directory where ALL processing happens and all results are written.
@@ -240,7 +244,8 @@ acquisition:
   # Unbinned pixel size of the RAW frames, in Angstrom.
   pixel_size: 1
 
-  # Extension of the raw frames: tif, tiff or eer.
+  # Extension of the raw frames: tif, tiff, eer or mrc (for mrc, see the note
+  # on paths.input_frames).
   frame_extension: "tiff"
 
   # Gain reference. Must be .mrc
