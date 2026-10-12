@@ -23,6 +23,7 @@ import glob
 import os
 import re
 
+from . import tiltfilter
 from .halfmap_sets import ensure_halfmaps_available, resolve_frame_halfmaps_dir
 from .mdoc import collect_tilt_series
 from .steplog import StepLog, step_completed
@@ -30,12 +31,14 @@ from .warptools import tiltseries_tilt_range
 from .utils import (
     banner,
     ensure_dir,
+    gpu_env,
+    gpu_flag_isonet,
+    gpu_id_note,
+    gpu_ids_for,
     info,
     link_file,
-    require_executable,
     run,
     warn,
-    gpu_flag_isonet,
 )
 
 # ------------------------------------------------------ isonet output layout
@@ -68,7 +71,8 @@ FINAL_PREDICT_PREFIX = "final_"
 # ------------------------------------------------------------------ half maps
 
 
-def _linked_half_maps(config, series_list, subset, log=None, dry_run=False):
+def _linked_half_maps(config, series_list, subset, log=None, force=False,
+                      dry_run=False):
     """Link the half maps of *series_list* into ``isonet/<subset>/{even,odd}``.
 
     Both halves are linked under the SAME base name (``<tomo>.mrc``) so that
@@ -85,6 +89,12 @@ def _linked_half_maps(config, series_list, subset, log=None, dry_run=False):
 
     The returned list is sorted by tomogram name, which is the order
     ``prepare_star`` sees the linked files in.
+
+    *force* re-points links that already exist. It matters for two real
+    cases, both of which leave the link NAME unchanged while changing what it
+    should resolve to: a forced re-reconstruction at a different
+    ``warptools.recon_angpix``, and MissAlignment's half maps appearing where
+    a previous run linked the plain ones.
     """
     ensure_halfmaps_available(config, log=log, dry_run=dry_run)
 
@@ -99,8 +109,10 @@ def _linked_half_maps(config, series_list, subset, log=None, dry_run=False):
         if not (os.path.exists(even) and os.path.exists(odd)):
             warn("no half maps for %s - excluded from IsoNet." % series.name)
             continue
-        link_file(even, os.path.join(even_dir, series.name + ".mrc"))
-        link_file(odd, os.path.join(odd_dir, series.name + ".mrc"))
+        link_file(even, os.path.join(even_dir, series.name + ".mrc"),
+                  force=force)
+        link_file(odd, os.path.join(odd_dir, series.name + ".mrc"),
+                  force=force)
         usable.append(series)
 
     if not usable:
@@ -152,8 +164,7 @@ def resolve_tilt_range(config, usable, ranges):
       shells are missing and synthesises them, overwriting measured data.
 
     The first is recoverable, the second destroys information, so the union
-    is the safe default. Outliers are reported by name so the mismatch is
-    never silent.
+    is the safe default.
 
     This is only what ``prepare_star`` is called with - it is corrected
     afterwards, back to a per-tomogram range read from each tomogram's own
@@ -188,25 +199,11 @@ def resolve_tilt_range(config, usable, ranges):
              % (tilt_min, tilt_max, len(ranges)))
         return tilt_min, tilt_max, False
 
-    warn("tilt ranges differ across %d tomograms:" % len(ranges))
-    outliers = []
-    for name in sorted(ranges):
-        low, high = ranges[name]
-        narrower_low = low - tilt_min
-        narrower_high = tilt_max - high
-        if narrower_low > TILT_TOLERANCE or narrower_high > TILT_TOLERANCE:
-            outliers.append(name)
-            warn("    %-24s %6.1f to %6.1f   <- %.1f/%.1f deg narrower"
-                 % (name, low, high, narrower_low, narrower_high))
-        else:
-            warn("    %-24s %6.1f to %6.1f" % (name, low, high))
-    warn("Using the widest range for prepare_star: %.1f to %.1f deg."
-         % (tilt_min, tilt_max))
-    warn("%s would be under-corrected by that range alone, because IsoNet "
-         "would assume tilt data they do not have - but tomograms.star gets "
-         "each tomogram's own range from its warp_tiltseries/<tomo>.xml right "
-         "after, so this only matters for the call to prepare_star itself."
-         % ", ".join(outliers))
+    # Not a problem worth a warning: this range only goes to prepare_star,
+    # and tomograms.star gets each tomogram's own range right after.
+    info("tilt ranges differ across %d tomograms - prepare_star is called "
+         "with the widest, %.1f to %.1f deg; each tomogram then gets its own "
+         "range in tomograms.star" % (len(ranges), tilt_min, tilt_max))
     return tilt_min, tilt_max, False
 
 
@@ -271,14 +268,21 @@ def _half_map_pixel_size(config, series):
     with an explicit --angpix (warptools.recon_angpix), so that is the
     ground truth directly - no need to re-derive it from independent binning
     factors the way the old MotionCor3+AreTomo2 pipeline had to.
+
+    Resolved through ``warptools.resolve_recon_angpix`` rather than read
+    verbatim, since recon_angpix may be written relative to the dataset's own
+    pixel size ("2*pixel_size") - exactly as the ts_reconstruct call itself
+    resolves it.
     """
-    return float(config["warptools"]["recon_angpix"])
+    from .warptools import resolve_recon_angpix
+    return resolve_recon_angpix(config)
 
 
 # ------------------------------------------------------------------- star file
 
 
-def prepare_star(config, series_list, subset, log=None, dry_run=False):
+def prepare_star(config, series_list, subset, log=None, force=False,
+                 dry_run=False):
     """Run ``isonet.py prepare_star``.
 
     No defocus is passed: ``isonet.ctf_mode`` is ``"None"`` (the half maps
@@ -295,7 +299,8 @@ def prepare_star(config, series_list, subset, log=None, dry_run=False):
     IsoNet wrote it on every row.
     """
     even_dir, odd_dir, usable = _linked_half_maps(config, series_list, subset,
-                                                  log=log, dry_run=dry_run)
+                                                  log=log, force=force,
+                                                  dry_run=dry_run)
 
     pixel_size = _half_map_pixel_size(config, usable[0])
     ranges = tilt_ranges(config, usable)
@@ -311,13 +316,13 @@ def prepare_star(config, series_list, subset, log=None, dry_run=False):
     tilt_min, tilt_max, fixed_tilt_range = resolve_tilt_range(config, usable, ranges)
 
     work_dir = ensure_dir(config.isonet_config_dir, "prepare_" + subset)
-    run([config.exe("isonet"), "prepare_star",
-         "--even", even_dir,
-         "--odd", odd_dir,
-         "--pixel_size", "%.4f" % pixel_size,
-         "--tilt_min", "%.2f" % tilt_min,
-         "--tilt_max", "%.2f" % tilt_max],
-        cwd=work_dir,
+    run(config.command("isonet", "prepare_star",
+                       "--even", even_dir,
+                       "--odd", odd_dir,
+                       "--pixel_size", "%.4f" % pixel_size,
+                       "--tilt_min", "%.2f" % tilt_min,
+                       "--tilt_max", "%.2f" % tilt_max),
+        cwd=work_dir, env=_gpu_env(config),
         log_file=os.path.join(config.isonet_config_dir,
                               "prepare_star_%s.log" % subset),
         dry_run=dry_run)
@@ -377,7 +382,47 @@ def resolve_network(config, key, default_dir):
 
 
 def _gpu_args(config):
-    return ["--gpuID", gpu_flag_isonet(config.gpus)]
+    """``--gpuID`` for IsoNet: the REAL GPU ids from the config, not remapped.
+
+    This is the one program in the pipeline that must not be given the
+    0..N-1 logical ids every other GPU argument uses, and getting it wrong
+    fails silently on the wrong cards rather than erroring.
+
+    IsoNet does not treat --gpuID as an index into the already-visible
+    devices. It ASSIGNS the value straight to the environment variable,
+    before importing its GPU backend - confirmed in IsoNet's own source
+    (``bin/refine.py``, ``bin/predict.py``)::
+
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpuID
+
+    So whatever we pass here REPLACES the CUDA_VISIBLE_DEVICES we set, and
+    is then interpreted against the full set of physical GPUs. Handing it
+    remapped ids (``--gpuID 0,1`` for a config of ``gpus: [2, 3]``) would
+    therefore put IsoNet on physical GPUs 0 and 1 - exactly the GPUs the
+    config asked it to stay off.
+
+    Contrast miss-alignment, which does the opposite: it uses its device
+    arguments as ``cuda:<index>`` against the visible set and never touches
+    the environment variable, so there the ids MUST be remapped (see
+    ``missalign.resolve_devices``).
+    """
+    return ["--gpuID", gpu_flag_isonet(gpu_ids_for("isonet", config.gpus))]
+
+
+def _gpu_env(config):
+    """Restrict IsoNet to the configured GPUs.
+
+    --gpuID alone is not quite enough: it only covers the steps we pass it
+    to (denoise/predict/refine), while prepare_star and make_mask get no GPU
+    argument at all, and any library in the process that initialises CUDA on
+    its own would otherwise default to device 0.
+
+    This and the real-id --gpuID above agree rather than fight: IsoNet
+    overwrites CUDA_VISIBLE_DEVICES with the same real ids we set here, so
+    the value is replaced by an identical one.
+    """
+    return gpu_env(config.gpus)
 
 
 def _extra_args(config):
@@ -398,7 +443,7 @@ def train(config, force=None, dry_run=False):
 
 def _train(config, log, force=False, dry_run=False):
     banner("IsoNet training")
-    require_executable(config.exe("isonet"), "IsoNet")
+    config.require("isonet", "IsoNet")
 
     settings = config["isonet"]
     work = ensure_dir(config.isonet_dir)
@@ -416,51 +461,64 @@ def _train(config, log, force=False, dry_run=False):
                      "Use --force to retrain." % network)
             return 0
 
-    series_list = collect_tilt_series(config.mdoc_dir("train"), "train")
+    series_list = tiltfilter.drop_excluded(
+        config, collect_tilt_series(config.mdoc_dir("train"), "train"),
+        "IsoNet training", log=log)
+    if not series_list:
+        log.fail("train_isonet", "every tilt series in %s is excluded (see "
+                 "%s)" % (config.mdoc_dir("train"), tiltfilter.record_path(config)))
+        return 1
     info("%d tilt series selected for IsoNet training" % len(series_list))
     log.note("training on %d tilt series from %s"
              % (len(series_list), config.mdoc_dir("train")))
 
+    log.note(gpu_id_note("isonet", config.gpus))
+
     banner("IsoNet 1/5  prepare_star")
-    star, _ = prepare_star(config, series_list, "train", log=log, dry_run=dry_run)
+    star, _ = prepare_star(config, series_list, "train", log=log, force=force,
+                           dry_run=dry_run)
 
     banner("IsoNet 2/5  denoise (%d epochs)" % int(settings["denoise_epochs"]))
-    run([config.exe("isonet"), "denoise", star,
-         "--CTF_mode", str(settings["ctf_mode"]),
-         "--epochs", str(int(settings["denoise_epochs"])),
-         "--output_dir", DENOISE_DIR]
-        + _gpu_args(config) + _extra_args(config),
-        cwd=work, log_file=os.path.join(logs, "denoise.log"), dry_run=dry_run)
+    run(config.command("isonet", "denoise", star,
+                       "--CTF_mode", str(settings["ctf_mode"]),
+                       "--epochs", str(int(settings["denoise_epochs"])),
+                       "--output_dir", DENOISE_DIR,
+                       _gpu_args(config), _extra_args(config)),
+        cwd=work, env=_gpu_env(config),
+        log_file=os.path.join(logs, "denoise.log"), dry_run=dry_run)
 
     banner("IsoNet 3/5  apply the denoiser (intermediate - feeds make_mask only)")
     denoise_network = (
         os.path.join(work, DENOISE_DIR, "network.pt") if dry_run
         else resolve_network(config, "denoise_network", DENOISE_DIR)
     )
-    run([config.exe("isonet"), "predict", star, denoise_network,
-         "--output_dir", DENOISE_PREDICT_DIR,
-         "--output_prefix", DENOISE_PREDICT_PREFIX]
-        + _gpu_args(config) + _extra_args(config),
-        cwd=work, log_file=os.path.join(logs, "predict_denoise.log"),
+    run(config.command("isonet", "predict", star, denoise_network,
+                       "--output_dir", DENOISE_PREDICT_DIR,
+                       "--output_prefix", DENOISE_PREDICT_PREFIX,
+                       _gpu_args(config), _extra_args(config)),
+        cwd=work, env=_gpu_env(config),
+        log_file=os.path.join(logs, "predict_denoise.log"),
         dry_run=dry_run)
 
     banner("IsoNet 4/5  make_mask")
-    run([config.exe("isonet"), "make_mask", star,
-         "--density_percentage", str(settings["density_percentage"]),
-         "--std_percentage", str(settings["std_percentage"]),
-         "--input_column", "rlnDenoisedTomoName",
-         "--output_dir", MASK_DIR],
-        cwd=work, log_file=os.path.join(logs, "make_mask.log"), dry_run=dry_run)
+    run(config.command("isonet", "make_mask", star,
+                       "--density_percentage", str(settings["density_percentage"]),
+                       "--std_percentage", str(settings["std_percentage"]),
+                       "--input_column", "rlnDenoisedTomoName",
+                       "--output_dir", MASK_DIR),
+        cwd=work, env=_gpu_env(config),
+        log_file=os.path.join(logs, "make_mask.log"), dry_run=dry_run)
 
     banner("IsoNet 5/5  refine (%d epochs)" % int(settings["refine_epochs"]))
-    run([config.exe("isonet"), "refine", star,
-         "--CTF_mode", str(settings["ctf_mode"]),
-         "--mw_weight", str(settings["mw_weight"]),
-         "--bfactor", str(settings["bfactor"]),
-         "--epochs", str(int(settings["refine_epochs"])),
-         "--output_dir", REFINE_DIR]
-        + _gpu_args(config) + _extra_args(config),
-        cwd=work, log_file=os.path.join(logs, "refine.log"), dry_run=dry_run)
+    run(config.command("isonet", "refine", star,
+                       "--CTF_mode", str(settings["ctf_mode"]),
+                       "--mw_weight", str(settings["mw_weight"]),
+                       "--bfactor", str(settings["bfactor"]),
+                       "--epochs", str(int(settings["refine_epochs"])),
+                       "--output_dir", REFINE_DIR,
+                       _gpu_args(config), _extra_args(config)),
+        cwd=work, env=_gpu_env(config),
+        log_file=os.path.join(logs, "refine.log"), dry_run=dry_run)
 
     info("IsoNet training finished. Networks are in %s"
          % os.path.join(work, REFINE_DIR))
@@ -479,16 +537,24 @@ def predict(config, force=None, dry_run=False):
 
 def _predict(config, log, force=False, dry_run=False):
     banner("IsoNet prediction")
-    require_executable(config.exe("isonet"), "IsoNet")
+    config.require("isonet", "IsoNet")
 
     work = ensure_dir(config.isonet_dir)
     logs = ensure_dir(work, "logs")
     ensure_dir(config.isonet_config_dir)
 
-    series_list = collect_tilt_series(config.mdoc_dir("predict"), "predict")
+    series_list = tiltfilter.drop_excluded(
+        config, collect_tilt_series(config.mdoc_dir("predict"), "predict"),
+        "IsoNet prediction", log=log)
+    if not series_list:
+        log.fail("predict_isonet", "every tilt series in %s is excluded (see "
+                 "%s)" % (config.mdoc_dir("predict"), tiltfilter.record_path(config)))
+        return 1
     info("%d tilt series selected for IsoNet prediction" % len(series_list))
     log.note("predicting %d tilt series from %s"
              % (len(series_list), config.mdoc_dir("predict")))
+
+    log.note(gpu_id_note("isonet", config.gpus))
 
     if not force and step_completed(config, "predict_isonet"):
         info("IsoNet prediction already complete.")
@@ -496,18 +562,19 @@ def _predict(config, log, force=False, dry_run=False):
                  "Use --force to redo it.")
     else:
         star, _ = prepare_star(config, series_list, "predict", log=log,
-                               dry_run=dry_run)
+                               force=force, dry_run=dry_run)
 
         network = (
             os.path.join(work, REFINE_DIR, "network.pt") if dry_run
             else resolve_network(config, "refine_network", REFINE_DIR)
         )
 
-        run([config.exe("isonet"), "predict", star, network,
-             "--output_dir", FINAL_PREDICT_DIR,
-             "--output_prefix", FINAL_PREDICT_PREFIX]
-            + _gpu_args(config) + _extra_args(config),
-            cwd=work, log_file=os.path.join(logs, "predict_refine.log"),
+        run(config.command("isonet", "predict", star, network,
+                           "--output_dir", FINAL_PREDICT_DIR,
+                           "--output_prefix", FINAL_PREDICT_PREFIX,
+                           _gpu_args(config), _extra_args(config)),
+            cwd=work, env=_gpu_env(config),
+            log_file=os.path.join(logs, "predict_refine.log"),
             dry_run=dry_run)
 
     final_dir = os.path.join(work, FINAL_PREDICT_DIR)

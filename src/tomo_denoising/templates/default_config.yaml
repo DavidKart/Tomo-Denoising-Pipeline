@@ -34,6 +34,19 @@
 
 
 # -----------------------------------------------------------------------------
+#  Config version
+# -----------------------------------------------------------------------------
+#  The tomo_denoising version this file was written for. Every step refuses
+#  to run if it differs from the installed version (tomo_denoising --version):
+#  settings get added, renamed or change meaning between versions, and an old
+#  file would otherwise run with silently different behaviour.
+#
+#  After updating the software: write a fresh template with.
+# -----------------------------------------------------------------------------
+config_version: "__TOMO_DENOISING_VERSION__"
+
+
+# -----------------------------------------------------------------------------
 #  Resuming
 # -----------------------------------------------------------------------------
 #  false (default): every step checks what is already finished and only redoes
@@ -42,6 +55,7 @@
 #
 #  Individual steps also accept --force on the command line, which overrides
 #  this for that one run.
+
 overwrite: false
 
 
@@ -64,10 +78,16 @@ paths:
   #     warp_tiltseries.settings / warp_tiltseries/      <- alignment + recon
   #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3)
   #       tiltstack/<tomo>/     ts_stack output
-  #       reconstruction/       ts_reconstruct scratch (--output_processing)
+  #       reconstruction/       ts_reconstruct output, one folder per call and
+  #                             pixel size (full_<px>, frames_<px>, tilts_<px>)
+  #                             - the files tomograms/ and raw_halfMaps*/ link
+  #                             to. Reconstructions at an earlier pixel size
+  #                             stay here (never linked again) until you
+  #                             remove them.
   #       tomograms/            full, non-split tomograms (always made)
   #       raw_halfMaps/         every even_/odd_ half map produced
-  #       raw_halfMaps_tiltSplit/  tilt-split half maps, for RESOLVE
+  #       raw_halfMaps_tiltSplit/  tilt-split half maps - only made when
+  #                                quality_check.enable_tilt_split is true
   #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
   #     missalignment/             <- MissAlignment-refined reconstructions,
   #                                   the SAME three directories as above
@@ -79,6 +99,33 @@ paths:
   #
   # The mdoc directories and frame directory may live anywhere.
   processing_directory: "processing"
+
+
+# -----------------------------------------------------------------------------
+#  Conda environments
+# -----------------------------------------------------------------------------
+#  Name (or path) of the conda/mamba environment a program is installed in,
+#  for the programs that commonly live in one of their own rather than in the
+#  environment tomo_denoising itself runs in - miss-alignment and WarpTools
+#  especially. When set, EVERY call to that program is run via
+#
+#    conda run -n <env> --no-capture-output <program> ...
+#
+#  using executables.conda, so the environment does not have to be activated
+#  beforehand and two programs needing incompatible environments can be used
+#  in the same run.
+#
+#  Leave empty (the default) when the matching 'executables' entry is already
+#  directly runnable - e.g. an absolute path into that environment's own bin/,
+#  or the program is installed in this environment too.
+#
+#  A path (anything containing a separator) is passed as  conda run -p <path>
+#  instead of  -n <name>.
+conda_env_missalign: ""
+conda_env_warptools: ""
+conda_env_aretomo: ""
+conda_env_isonet: ""
+conda_env_resolve: ""
 
 
 # -----------------------------------------------------------------------------
@@ -107,26 +154,81 @@ mdocs:
 
 
 # -----------------------------------------------------------------------------
+#  Flawed tilt series   (checked in align_tiltseries, before ts_import)
+# -----------------------------------------------------------------------------
+#  Aborted or broken acquisitions are flagged from their mdoc right at the 
+#  start if:
+#
+#    - fewer than min_tilts tilts, or than min_tilts_fraction x the dataset's
+#      median tilt count
+#    - an angular range below min_span_fraction x the dataset's median range
+#    - a gap between neighbouring tilts over max_gap_factor x the series' own
+#      median step
+#
+#  The fractions compare against the dataset itself, so any tilt scheme works.
+#  With fewer than 5 tilt series in the dataset only min_tilts and the gap
+#  check apply.
+#
+#  mode:
+#    "exclude" - leave flagged series out and continue. Nothing is moved or
+#                deleted: ts_import reads its mdocs from
+#                  <processing_directory>/mdocs_filtered/
+#    "stop"    - stop before ts_import and list the flagged series, to decide
+#                yourself (e.g. move their mdocs out of mdocs.preprocessing).
+#    "off"     - no check.
+#
+#  Tilt series a later WarpTools step gives up on (AreTomo3 alignment, CTF,
+#  reconstruction) are excluded the same way and listed in the same file,
+#  whatever the mode - the run goes on with the rest. align_tiltseries --force
+#  runs them through WarpTools again (WarpTools itself may skip the ones it
+#  marked unselected until they are re-selected with its change_selection).
+#
+#  The check runs on every align_tiltseries. On a project that is already
+#  aligned, changing these settings either stops the run with a list of
+#  WarpTools files to remove (newly flagged series), or redoes the alignment
+#  (series no longer flagged need importing and aligning).
+# -----------------------------------------------------------------------------
+tiltseries_filter:
+
+  mode: "exclude"
+
+  min_tilts: 10
+  min_tilts_fraction: 0.5
+  min_span_fraction: 0.5
+  max_gap_factor: 5
+
+
+# -----------------------------------------------------------------------------
 #  External programs
 # -----------------------------------------------------------------------------
 #  Either a bare name (looked up on PATH) or an absolute path to the binary.
 # -----------------------------------------------------------------------------
 executables:
   aretomo:    "AreTomo3"
-  header:     "header"                        # IMOD, pixel-size fallback only
   isonet:     "isonet.py"
   resolve:    "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
   warptools:  "WarpTools"
   missalign:  "/opt/Tomo-Denoising-Pipeline/bin/miss-alignment"                # run_missalignment
-  # Only used if missalign.conda_env is set. Use the
-  # absolute path to the real binary.
+
+  # OPTIONAL 
+  header:     "header"
+
+  # Only used if one of the conda_env_* settings above is set. 
   conda:      "/path/to/conda"
 
 # -----------------------------------------------------------------------------
 #  GPUs
 # -----------------------------------------------------------------------------
-#  One list, translated into whatever each program expects
-#  (WarpTools CUDA_VISIBLE_DEVICES + --perdevice, IsoNet "--gpuID 0,1").
+#  One list, and the ONLY GPUs any program this pipeline runs can see or use:
+#  every external call (WarpTools, AreTomo3 - both this pipeline's own
+#  axis-search runs and native ts_aretomo3 -, RESOLVE, IsoNet,
+#  miss-alignment) is launched with CUDA_VISIBLE_DEVICES set from this list.
+#
+#  Programs that ALSO take GPU ids as arguments are given them automatically,
+#  translated into the 0..N-1 numbering they see inside such a process
+#  (IsoNet --gpuID, AreTomo3 -Gpu, miss-alignment --training-devices /
+#  --reconstruction-devices). Write real GPU ids here and everywhere else in
+#  this file; the translation is never something to do by hand.
 gpus: [0, 1]
 
 
@@ -176,8 +278,8 @@ frameseries:
   # Only used when acquisition.frame_extension is "eer".
   eer_ngroups: ""
 
-  m_grid: "1x1x3"
-  c_grid: "2x2x1"
+  m_grid: "1x1x5"  # -> SPECIFY (1x1x<NumSubFrames from the mdocs>)
+  c_grid: "2x2x1"  # -> default is usually fine
   c_range_max: 7.0 # max res for CTF fit. Must be > Nyq of motion-corrected averages.
   c_defocus_max: 8.0 # max defocus to be considered
   c_use_sum: true
@@ -269,35 +371,26 @@ aretomo:
 
 
 # -----------------------------------------------------------------------------
-#  Additional tilt-split half maps
-# -----------------------------------------------------------------------------
-#  Frame-split half maps land in warp_tiltseries/raw_halfMaps/ (or
-#  missalignment/raw_halfMaps/, once populated) - that is what IsoNet trains
-#  on. Whether they get reconstructed at all in a given run_pipe run depends
-#  on MissAlignment (see the 'missalign' section below) - they are not
-#  unconditional.
-#
-#  Tilt splitting is done IN ADDITION when enabled here, reusing the same
-#  alignment. The result lands in warp_tiltseries/raw_halfMaps_tiltSplit/ (or
-#  missalignment/raw_halfMaps_tiltSplit/) and is what quality_check measures
-#  with RESOLVE - whichever of the two is preferred (see halfmap_sets.
-#  resolve_tiltsplit_halfmaps_dir).
-# -----------------------------------------------------------------------------
-tilt_split:
-
-  enabled: true
-
-  # Pixel size in Angstrom aimed for in the tilt-split reconstructions.
-  target_pixel_size: 50.0
-
-
-# -----------------------------------------------------------------------------
 #  WarpTools   (motion_correct / align_tiltseries / reconstruct_tomograms)
 # -----------------------------------------------------------------------------
 warptools:
 
   dont_invert: false             # ts_import --dont_invert
   min_intensity: 0.3             # ts_import --min_intensity
+
+  # --- tilt ANGLE offset (ts_import) ----------------------------------------
+  # This is the 0-tilt zero point - the specimen's pre-tilt
+  # Both auto_zero and tilt_offset are off by default:
+  # Optionally oet ONE of them, not both.
+
+  # ts_import --auto_zero: shift every tilt angle so that the tilt with the
+  # highest average intensity becomes the 0-tilt. 
+  auto_zero: false
+
+  # ts_import --tilt_offset: subtract this many degrees from every tilt angle.
+  # Use when you already know the pre-tilt, e.g. a lamella milled at a fixed
+  # angle. Empty (default) = no shift.
+  tilt_offset: ""
 
   # Pixel size (A) for ts_stack, this pipeline's own axis-search AreTomo
   # calls, and native ts_aretomo3 - coarser than the final reconstruction, as
@@ -310,14 +403,19 @@ warptools:
 
   min_fov: 0                     # ts_aretomo3 --min_fov
 
-  # ts_defocus_hand --check, and apply the fix (--set_flip) automatically if
-  # it reports the handedness is flipped.
+  # ts_defocus_hand --check always runs: a negative average correlation means
+  # the handedness should be 'flip', otherwise 'no flip'. true: tilt series
+  # set otherwise are corrected automatically (--set_flip / --set_noflip),
+  # and the result is verified. false: they are only reported.
   auto_fix_defocus_hand: true
 
   ts_ctf_range_high: 7.0 # needs be > 2*align_angpix
   ts_ctf_defocus_max: 8.0 # max defocus to be considered
 
   # How many tilt series WarpTools reconstructs/aligns at once, per GPU.
+  # Which GPUs is not set here - it comes from the top-level 'gpus' list, as
+  # for every other program (passed as WarpTools' own --device_list where the
+  # subcommand supports it, on top of CUDA_VISIBLE_DEVICES).
   perdevice: 1
 
 
@@ -327,19 +425,11 @@ warptools:
 #  Refines each tomogram's ts_aretomo3 alignment with MissAlignment's local,
 #  per-tilt deformation model (modifying warp_tiltseries/<tomo>.xml IN
 #  PLACE - a backup is kept in warp_tiltseries_prealign/), then reconstructs
-#  BOTH the frame-split (for IsoNet) and tilt-split (for RESOLVE) half maps
-#  with WarpTools ts_reconstruct.
+#  the frame-split (for IsoNet) half maps with WarpTools ts_reconstruct -
+#  plus the tilt-split ones, if quality_check.enable_tilt_split asks for
+#  them.
 #
-#  Runs by default as part of run_pipe. reconstruct_tomograms always
-#  reconstructs the full tomogram regardless, but by default skips the
-#  (otherwise pointless) pre-MissAlignment half maps when MissAlignment is
-#  about to redo them from the refined alignment - pass run_pipe's
-#  --produce-intermediates to reconstruct both sets of half maps anyway (in
-#  genuinely separate locations - never the same physical files under two
-#  names), purely to have both on disk - quality_check still only ever
-#  measures the single preferred set with RESOLVE. A MissAlignment failure
-#  stops run_pipe rather than silently falling back. Pass
-#  --skip-missalignment to disable MissAlignment for a run and reconstruct
+#  Pass --skip-missalignment to disable MissAlignment for a run and reconstruct
 #  the uncorrected half maps directly instead, or set enabled: false here.
 #
 #  Everything lands in <processing_directory>/missalignment/, including two
@@ -360,36 +450,64 @@ missalign:
 
   # "XxYxZ" (unbinned px, same convention as tomo_dimensions) to tighten the
   # volume MissAlignment trains against so it does not spend capacity on
-  # empty margins - see MissAlignment's own docs: "the tomogram shape should
-  # tightly fit your sample ... to avoid training on empty regions".
+  # empty margins.
   # Leave empty (default) to train against the same dimensions as the final
   # reconstruction (tomo_dimensions).
   training_volume_dimensions: ""
 
-  # Name (or path) of the conda/mamba environment miss-alignment is
-  # installed in, if it lives in a separate one from the rest of the
-  # pipeline. When set, "miss-alignment train" is run via
-  #   conda run -n <env> --no-capture-output ...
-  # Leave empty (default) if executables.missalign is already
-  # directly runnable.
-  conda_env: ""
-
-  # Assumed VRAM per GPU used for MissAlignment training, in GB. Scales
-  # data_loading.batch_size / tilt_series_alignment.batch_size in the
-  # generated MissAlignment config (MissAlignment's own reference: batch
-  # size 32 for 24 GB cards).
+  # VRAM per GPU, in GB - the single setting that adapts MissAlignment to
+  # the machine. Two profiles:
+  #
+  #   >= 24   MissAlignment's own documented reference settings, unchanged:
+  #           batch size 32 for both the training and the reconstruction
+  #           pool, and 3 reconstruction processes per GPU.
+  #
+  #   < 24    Low-memory profile, down to 12 GB (anything lower is treated
+  #           as 12 and warned about). Three things shrink together, 
+  #           data_loading.batch_size, tilt_series_alignment.batch_size, 
+  #           how many reconstruction PROCESSES share one GPU.
+  #           Also fewer dataloaders per trainer, which each drive
+  #           reconstruction work. What is NOT reduced: patch_size (96). 
+  #
+  #           Expect the smaller training batch to make the contrastive
+  #           training a little noisier, i.e. a somewhat weaker correction
+  #           than a 24 GB card would give - not a different kind of result.
+  #
   gpu_memory_gb: 12
 
-  # Overrides - leave null (the default) to auto-compute training_devices/
-  # reconstruction_devices as roughly half-and-half of the top-level 'gpus'
-  # list. 
-  batch_size: null
+  # Overrides for everything the gpu_memory_gb profile decides. Leave null
+  # (the default) to use the profile. 
+  batch_size: null                        # data_loading.batch_size
+  alignment_batch_size: null              # tilt_series_alignment.batch_size
+  reconstruction_processes_per_gpu: null
   training_devices: null
   reconstruction_devices: null
   dataloaders_per_trainer: null
 
   # miss-alignment train's --prepare-stacks, in GB of scratch space.
   prepare_stacks_gb: 10.0
+
+  # NCCL transport control for multi-GPU training (ignored with a single
+  # training device - there is no DDP and no NCCL then).
+  # On servers whose GPUs sit behind different PCIe switches, NCCL's
+  # peer-to-peer transport can STALL rather than fail.
+  #
+  # Values, from NCCL's NCCL_P2P_LEVEL ("the maximum distance between GPUs
+  # where NCCL will use the P2P transport"):
+  #
+  #   "PIX"  (default) P2P within one PCI switch, and over NVLink; not across
+  #          switches. Fixes the hang while keeping the paths that are fast.
+  #   "NVL"  P2P only between NVLink-connected GPUs.
+  #   "LOC"  never use P2P.
+  #   "off"  sets NCCL_P2P_DISABLE=1 instead - miss-alignment's own documented
+  #          fix. Blunter: NVIDIA's docs define P2P as direct access "using
+  #          NVLink or PCI", so this gives up NVLink too. Use it if "PIX" is
+  #          not enough on your machine.
+  #   ""     leave NCCL's own defaults completely alone.
+  #
+  # Correctness is unaffected by any of these - they choose a transport, not
+  # an algorithm. Only bandwidth differs.
+  nccl_p2p: "PIX"
 
 
 # -----------------------------------------------------------------------------
@@ -406,11 +524,9 @@ isonet:
   # CTF handling mode passed to denoise/refine. "None" (the exact string
   # IsoNet2's CLI expects) is correct here and should normally stay that
   # way: the half maps IsoNet trains on are already CTF-corrected by
-  # WarpTools (ts_defocus_hand -> ts_ctf -> ts_reconstruct, run before
-  # IsoNet ever sees them). IsoNet2's other modes ("network"/"wiener"/
+  # WarpTools  IsoNet2's other modes ("network"/"wiener"/
   # "phase_only") each assume RAW, un-CTF-corrected weighted-back-projection
-  # input and apply their own CTF-shaped correction on top of it - using one
-  # of them here would double-correct data that is already corrected.
+  # input and apply their own CTF-shaped correction on top of it.
   ctf_mode: "None"
 
   # make_mask
@@ -444,25 +560,37 @@ isonet:
 # -----------------------------------------------------------------------------
 #  RESOLVE quality check   (tomo_denoising quality_check)
 # -----------------------------------------------------------------------------
-#  Runs RESOLVE in batch mode over raw_halfMaps_tiltSplit to estimate a
-#  resolution and a signal ratio per tomogram. Requires tilt_split.enabled.
-#  Everything RESOLVE writes goes to <processing_directory>/resolve.
+#  Runs RESOLVE in batch mode over a directory of even/odd half maps to
+#  estimate a resolution and a signal ratio per tomogram - it needs two
+#  genuinely independent reconstructions of the same volume, which both
+#  half-map kinds are. Everything RESOLVE writes goes to
+#  <processing_directory>/resolve.
 #
 #  It also produces the results figure, a multi-page PDF with a central Z, Y
-#  and X slice of every DENOISED tomogram, sorted best
-#  resolution first.
+#  and X slice of every DENOISED tomogram, sorted best resolution first.
 # -----------------------------------------------------------------------------
 quality_check:
+
+  # WHICH half maps RESOLVE measures.
+  #
+  #   true   A dedicated TILT-split reconstruction.
+  #   false  FRAME-split half maps.
+  enable_tilt_split: true
+
+  # Pixel size in Angstrom the tilt-split reconstructions are made at.
+  # Deliberately much coarser than warptools.recon_angpix - tilt-split halves
+  # differ from each other far more than frame-split ones.
+  tilt_split_target_pixel_size: 50.0 # Should probably be ~50
 
   # RESOLVE --fast: skips some shells and increases the step size.
   fast: true
 
   gpu_enabled: true
-  cpu_threads: 16
+  cpu_threads: 4
 
   # Populate the mdocs.train directory automatically from the RESOLVE ranking,
-  # but ONLY when it does not exist or holds no .mdoc files. Existing training
-  # selections are never touched.
+  # but ONLY when it does not exist or holds no .mdoc files.
+  # A selection you made yourself is never touched. 
   choose_training_set: true
   min_signal_ratio: 0.35
   outlier_factor: 1.5

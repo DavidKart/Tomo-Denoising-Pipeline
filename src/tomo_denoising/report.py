@@ -15,6 +15,13 @@ which is how 3dmod displays them. Panels are captioned with the RESOLVE
 resolution and signal ratio and sorted best resolution first, eight tomograms
 per page (4 columns x 2 rows).
 
+The resolution is named after the half maps it was actually measured on -
+"Tilt-split resolution" or "Frame-split resolution", see
+``halfmap_sets.resolution_label``. The two are not comparable: frame-split
+halves differ from each other far less, so the number is systematically more
+optimistic, and a caption that did not say which was used would invite
+comparing figures from two differently configured runs.
+
 The figure is rebuilt whenever both halves exist - after quality_check when a
 denoising result is already there, and after a prediction step when RESOLVE
 results are already there.
@@ -25,6 +32,7 @@ import os
 
 import numpy as np
 
+from .halfmap_sets import resolution_label
 from .mdoc import match_tomo_name
 from .utils import ensure_dir, info, warn
 
@@ -170,7 +178,8 @@ def compose_xyz(xy, xz, zy, gutter):
     return canvas
 
 
-def _draw_tomogram(figure, cell, path, measurement, name):
+def _draw_tomogram(figure, cell, path, measurement, name,
+                   resolution_name="Resolution"):
     """Draw one tomogram's three central slices into *cell*."""
     axis = figure.add_subplot(cell)
     axis.set_xticks([])
@@ -218,8 +227,9 @@ def _draw_tomogram(figure, cell, path, measurement, name):
                                  edgecolor="black", linewidth=0.6))
 
     if measurement is not None:
-        caption = "%s\nHalf-split resolution: %.1f Å   Signal ratio: %.2f" % (
-            name, measurement.resolution, measurement.signal_ratio)
+        caption = "%s\n%s: %.1f Å   Signal ratio: %.2f" % (
+            name, resolution_name, measurement.resolution,
+            measurement.signal_ratio)
     else:
         caption = "%s\n(not measured)" % name
     axis.set_title(caption, fontsize=6.5, pad=3)
@@ -258,6 +268,7 @@ def build_report(config, denoiser, volumes, measurements, log=None):
     ensure_dir(os.path.dirname(path))
     info("building %s (%d tomograms)" % (path, len(names)))
 
+    resolution_name = resolution_label(config)
     pages = (len(names) + PER_PAGE - 1) // PER_PAGE
     with PdfPages(path) as pdf:
         for page in range(pages):
@@ -265,8 +276,8 @@ def build_report(config, denoiser, volumes, measurements, log=None):
             figure = plt.figure(figsize=(11.69, 8.27),      # A4 landscape
                                dpi=FIGURE_DPI)
             figure.suptitle(
-                "%s - denoised tomograms, best resolution first  "
-                "(page %d of %d)" % (denoiser, page + 1, pages),
+                "%s - denoised tomograms, best %s first  (page %d of %d)"
+                % (denoiser, resolution_name.lower(), page + 1, pages),
                 fontsize=10,
             )
             grid = GridSpec(ROWS_PER_PAGE, COLUMNS_PER_PAGE, figure=figure,
@@ -276,7 +287,8 @@ def build_report(config, denoiser, volumes, measurements, log=None):
                 cell = grid[index // COLUMNS_PER_PAGE,
                             index % COLUMNS_PER_PAGE]
                 _draw_tomogram(figure, cell, volumes[name],
-                               measurements.get(name), name)
+                               measurements.get(name), name,
+                               resolution_name=resolution_name)
             pdf.savefig(figure, dpi=FIGURE_DPI)
             plt.close(figure)
 

@@ -12,7 +12,7 @@ import platform
 import socket
 import time
 
-from .utils import ensure_dir, info, warn
+from .utils import ensure_dir, human_duration, info, warn
 
 #: Written next to a step's log once it has finished without fatal errors.
 _MARKER_SUFFIX = ".done"
@@ -39,6 +39,7 @@ class StepLog(object):
         self.succeeded = []
         self.failed = []
         self.skipped = []
+        self.excluded = []
         self.tasks = {}
         self.fatal = None
         self._started = None
@@ -74,6 +75,11 @@ class StepLog(object):
 
     def skip(self, name, reason="already done"):
         self.skipped.append((name, reason))
+
+    def exclude(self, name, reason):
+        """A tilt series deliberately left out (see tiltfilter) - reported
+        on its own, neither a failure nor a success."""
+        self.excluded.append((name, reason))
 
     # --------------------------------------------------------------- context
     def __enter__(self):
@@ -111,6 +117,11 @@ class StepLog(object):
             out.append("Skipped (already complete):")
             for name, reason in self.skipped:
                 out.append("  %-24s %s" % (name, reason))
+        if self.excluded:
+            out.append("")
+            out.append("EXCLUDED tilt series (not processed further):")
+            for name, reason in self.excluded:
+                out.append("  %-24s %s" % (name, reason))
         if self.failed:
             out.append("")
             out.append("FAILED:")
@@ -125,7 +136,7 @@ class StepLog(object):
             "tomo_denoising  %s" % self.step,
             "=" * 78,
             "finished   : %s" % _timestamp(),
-            "duration   : %s" % _human_duration(elapsed),
+            "duration   : %s" % human_duration(elapsed),
             "host       : %s" % _host(),
             "config     : %s" % self.config.source,
             "processing : %s" % self.config.processing_dir,
@@ -158,19 +169,12 @@ class StepLog(object):
 
         info("report: %s" % self.path)
         if self.failed:
-            warn("%d of %d tilt series had problems - see the report."
-                 % (len(self.failed), len(self.failed) + len(self.succeeded)))
-
-
-def _human_duration(seconds):
-    seconds = int(seconds)
-    hours, rest = divmod(seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return "%dh %02dm %02ds" % (hours, minutes, secs)
-    if minutes:
-        return "%dm %02ds" % (minutes, secs)
-    return "%ds" % secs
+            # Entries are tilt series AND whole sub-steps (e.g. "ts_aretomo3"),
+            # so this is a count of problems, not of tilt series.
+            warn("%d problem(s) reported - see the report." % len(self.failed))
+        if self.excluded:
+            warn("%d tilt series excluded: %s - see the report."
+                 % (len(self.excluded), ", ".join(n for n, _ in self.excluded)))
 
 
 def _host():

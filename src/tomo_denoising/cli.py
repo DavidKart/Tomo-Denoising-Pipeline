@@ -18,7 +18,8 @@ Steps, in the order they are normally run:
   align_tiltseries      ts_import, ts_stack, tilt axis search, native
                         ts_aretomo3 (axis fixed, no search)
   reconstruct_tomograms ts_defocus_hand, ts_ctf, ts_reconstruct (full
-                        tomogram, frame-split and tilt-split half maps)
+                        tomogram, frame-split half maps, and tilt-split half
+                        maps if quality_check.enable_tilt_split is set)
   run_missalignment     MissAlignment-refined reconstruction (on by default;
                         --skip-missalignment in run_pipe disables it)
   quality_check         RESOLVE resolution estimate, training set, results figure

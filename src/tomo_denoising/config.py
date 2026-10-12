@@ -5,12 +5,20 @@ import sys
 
 import yaml
 
+from . import __version__
+from .utils import require_executable, warn, wrap_conda_run
+
 try:  # py3.9+
     from importlib.resources import files as _resource_files
 except ImportError:  # pragma: no cover - py3.8
     _resource_files = None
 
 DEFAULT_CONFIG_NAME = "tomo_denoising_config.yaml"
+
+#: Executables that may live in a conda/mamba environment of their own, run
+#: via ``conda run -n <env> ...`` (see :meth:`Config.command`). The config key
+#: for each is ``conda_env_<name>`` at the top level, next to ``paths``.
+CONDA_WRAPPABLE = ("warptools", "missalign", "aretomo", "isonet", "resolve")
 
 #: Fallback values merged under whatever the user supplies, so an incomplete
 #: config never raises a KeyError deep inside a processing step.
@@ -25,6 +33,14 @@ DEFAULTS = {
         "train": "",
         "predict": "",
     },
+    "tiltseries_filter": {
+        # exclude | stop | off - see tiltfilter.py and the template comments.
+        "mode": "exclude",
+        "min_tilts": 10,
+        "min_tilts_fraction": 0.5,
+        "min_span_fraction": 0.5,
+        "max_gap_factor": 5,
+    },
     "executables": {
         # The SAME AreTomo build/version is used everywhere - both for our own
         # external tilt-axis-search calls and passed to WarpTools'
@@ -35,9 +51,16 @@ DEFAULTS = {
         "resolve": "RESOLVE",
         "warptools": "WarpTools",
         "missalign": "miss-alignment",
-        # Only used when missalign.conda_env is set - see that section.
+        # Only used when one of the conda_env_* settings is set.
         "conda": "conda",
     },
+    # Per-program conda/mamba environments - "" (the default) means the
+    # matching "executables" entry is run directly. See CONDA_WRAPPABLE.
+    "conda_env_missalign": "",
+    "conda_env_warptools": "",
+    "conda_env_aretomo": "",
+    "conda_env_isonet": "",
+    "conda_env_resolve": "",
     "overwrite": False,
     "gpus": [0, 1],
     "acquisition": {
@@ -106,10 +129,6 @@ DEFAULTS = {
         "tilt_axis_seed": 0,
         "extra_args": "",
     },
-    "tilt_split": {
-        "enabled": True,
-        "target_pixel_size": 40.0,
-    },
     "warptools": {
         "dont_invert": False,
         "min_intensity": 0.3,
@@ -120,6 +139,11 @@ DEFAULTS = {
         # Final reconstruction pixel size (A), for ts_reconstruct.
         "recon_angpix": 9.0,
         "min_fov": 0,
+        # Tilt-ANGLE offset handling on ts_import - the 0-tilt zero point /
+        # specimen pre-tilt, NOT the tilt axis rotation. Both off by default,
+        # so the mdoc's own tilt angles are used unchanged.
+        "auto_zero": False,
+        "tilt_offset": "",
         "auto_fix_defocus_hand": True,
         "ts_ctf_range_high": 7.0,
         "ts_ctf_defocus_max": 8.0,
@@ -132,6 +156,14 @@ DEFAULTS = {
         "choose_training_set": True,
         "min_signal_ratio": 0.25,
         "outlier_factor": 1.5,
+        # true  -> RESOLVE measures dedicated TILT-split half maps, an extra
+        #          reconstruction made only for this (at the coarse
+        #          tilt_split_target_pixel_size below).
+        # false -> RESOLVE measures the FRAME-split half maps that are
+        #          reconstructed anyway for IsoNet, and no tilt-split
+        #          reconstruction is made at all.
+        "enable_tilt_split": True,
+        "tilt_split_target_pixel_size": 50.0,
     },
     "isonet": {
         "denoise_epochs": 50,
@@ -162,30 +194,129 @@ DEFAULTS = {
         # Leave empty (default) to train against the same dimensions as the
         # final reconstruction (tomo_dimensions).
         "training_volume_dimensions": "",
-        # Name (or path) of the conda/mamba environment miss-alignment is
-        # installed in, if it lives in a separate one from the rest of the
-        # pipeline. When set, "miss-alignment train" is run via
-        # `conda run -n <env> --no-capture-output ...` (executables.conda),
-        # so that environment does not need to be activated beforehand.
-        # Leave empty (default) if executables.missalign is already directly
-        # runnable (e.g. an absolute path into that environment's own bin/,
-        # or miss-alignment is installed in the same environment
-        # tomo_denoising itself runs in).
-        "conda_env": "",
+        # VRAM per GPU, in GB. >= 24 uses MissAlignment's own reference
+        # settings unchanged; anything lower selects the low-memory profile
+        # (see missalign._memory_profile), which is what makes the step run
+        # at all on a 12 GB card.
         "gpu_memory_gb": 12,
-        # null = auto-compute from gpu_memory_gb / config.gpus. Set any of
-        # these explicitly to override the auto-partitioning.
+        # null = taken from the gpu_memory_gb profile / config.gpus. Set any
+        # of these explicitly to override it.
         "batch_size": None,
+        "alignment_batch_size": None,
+        "reconstruction_processes_per_gpu": None,
         "training_devices": None,
         "reconstruction_devices": None,
         "dataloaders_per_trainer": None,
         "prepare_stacks_gb": 10.0,
+        # NCCL transport control for multi-GPU training - see
+        # missalign.resolve_nccl_env. "" leaves NCCL's own defaults alone.
+        "nccl_p2p": "PIX",
     },
+}
+
+
+#: Replaced by the running version when create_config writes the template.
+_VERSION_PLACEHOLDER = "__TOMO_DENOISING_VERSION__"
+
+#: Settings that have since moved and that :meth:`Config._migrate_legacy`
+#: still honours - recognised, but reported as moved rather than unknown.
+_LEGACY_KEYS = {
+    "tilt_split": "quality_check.enable_tilt_split / "
+                  "quality_check.tilt_split_target_pixel_size",
+    "missalign.conda_env": "conda_env_missalign",
 }
 
 
 class ConfigError(Exception):
     """Raised when the configuration is missing or inconsistent."""
+
+
+def _key_paths(data, prefix=""):
+    """Dotted paths of every key in *data*, descending only into sections
+    that are sections (dicts) in DEFAULTS too - so a list or free-form value
+    is one setting, not a tree of them."""
+    paths = []
+    for key, value in data.items():
+        path = prefix + str(key)
+        paths.append(path)
+        default = _lookup(DEFAULTS, path)
+        if isinstance(value, dict) and isinstance(default, dict):
+            paths.extend(_key_paths(value, path + "."))
+    return paths
+
+
+def _lookup(tree, path):
+    node = tree
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _key_differences(raw):
+    """(unknown, moved, missing) dotted key paths of the user's *raw* config
+    relative to DEFAULTS (which mirrors the shipped template exactly)."""
+    user = set(_key_paths(raw)) - {"config_version"}
+    known = set(_key_paths(DEFAULTS))
+    moved = sorted(k for k in user if k in _LEGACY_KEYS)
+    # Children of a moved section are covered by reporting the section.
+    unknown = sorted(k for k in user - known
+                     if k not in _LEGACY_KEYS
+                     and not any(k.startswith(m + ".") for m in moved))
+    missing = sorted(k for k in known - user
+                     if not any(k.startswith(m + ".") for m in known - user
+                                if m != k))
+    return unknown, moved, missing
+
+
+def check_config_version(raw, source):
+    """Refuse a config written for a different tomo_denoising version.
+
+    A hard stop on ANY difference, by design: settings get added, renamed or
+    change meaning between versions, and a config carried over from an older
+    install would otherwise run with silently different behaviour. The error
+    lists the concrete key differences to review. With matching versions,
+    keys this version does not know (typos, most likely) are only warned
+    about.
+    """
+    unknown, moved, missing = _key_differences(raw)
+    details = []
+    if unknown:
+        details.append("  not recognised by %s (ignored if left in):\n%s"
+                       % (__version__, "\n".join("    " + k for k in unknown)))
+    if moved:
+        details.append("  moved:\n%s" % "\n".join(
+            "    %s -> %s" % (k, _LEGACY_KEYS[k]) for k in moved))
+    if missing:
+        details.append("  not in your file (the built-in default is used):\n%s"
+                       % "\n".join("    " + k for k in missing))
+
+    written_for = raw.get("config_version")
+    written_for = "" if written_for is None else str(written_for).strip()
+    if written_for != __version__:
+        found = ("has no config_version (written before versioned configs)"
+                 if not written_for else
+                 "was written for tomo_denoising %s" % written_for)
+        raise ConfigError(
+            "%s %s, but this is tomo_denoising %s.\n"
+            "Settings may have been added, renamed or changed meaning since. "
+            "Write a fresh template with\n"
+            "    tomo_denoising create_config -o new_config.yaml\n"
+            "compare it with your file, carry over what changed, then set\n"
+            "    config_version: \"%s\"\n"
+            "in your file.%s"
+            % (source, found, __version__, __version__,
+               ("\n\nDifferences between your file and this version's "
+                "template:\n" + "\n".join(details)) if details else
+               "\n\nIts keys match this version's template exactly, but a "
+               "setting may still have changed meaning - compare against the "
+               "new template's comments.")
+        )
+    if unknown:
+        warn("%s has setting(s) tomo_denoising %s does not know - they are "
+             "ignored. Typo?\n%s" % (source, __version__,
+                                     "\n".join("    " + k for k in unknown)))
 
 
 def _template_text():
@@ -213,7 +344,7 @@ def write_template(path, force=False):
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write(_template_text())
+        handle.write(_template_text().replace(_VERSION_PLACEHOLDER, __version__))
     return path
 
 
@@ -233,7 +364,9 @@ class Config(object):
 
     def __init__(self, data, source):
         self.source = source
+        check_config_version(data or {}, source)
         self.data = _merge(DEFAULTS, data)
+        self._migrate_legacy(data or {})
         self._validate()
 
     # ------------------------------------------------------------------ load
@@ -252,6 +385,41 @@ class Config(object):
         if not isinstance(data, dict):
             raise ConfigError("%s does not contain a YAML mapping." % path)
         return cls(data, path)
+
+    def _migrate_legacy(self, raw):
+        """Honour settings that have since moved, so an older, hand-edited
+        config keeps working instead of silently reverting to a default.
+
+        *raw* is the user's own data, BEFORE the defaults were merged under
+        it - the only way to tell "the user wrote this" from "this is the
+        default value".
+        """
+        legacy_split = raw.get("tilt_split")
+        quality = raw.get("quality_check") or {}
+        if isinstance(legacy_split, dict):
+            moved = []
+            if "enabled" in legacy_split and "enable_tilt_split" not in quality:
+                self.data["quality_check"]["enable_tilt_split"] = bool(
+                    legacy_split["enabled"])
+                moved.append("enabled -> quality_check.enable_tilt_split")
+            if ("target_pixel_size" in legacy_split
+                    and "tilt_split_target_pixel_size" not in quality):
+                self.data["quality_check"]["tilt_split_target_pixel_size"] = float(
+                    legacy_split["target_pixel_size"])
+                moved.append("target_pixel_size -> "
+                             "quality_check.tilt_split_target_pixel_size")
+            if moved:
+                warn("%s still has a 'tilt_split' section; it now lives in "
+                     "'quality_check'. Using it for now (%s) - move it there "
+                     "to silence this." % (self.source, "; ".join(moved)))
+            self.data.pop("tilt_split", None)
+
+        legacy_env = str((raw.get("missalign") or {}).get("conda_env") or "").strip()
+        if legacy_env and not str(raw.get("conda_env_missalign") or "").strip():
+            self.data["conda_env_missalign"] = legacy_env
+            warn("%s still sets missalign.conda_env; it is now the top-level "
+                 "'conda_env_missalign'. Using it for now - move it there to "
+                 "silence this." % self.source)
 
     def _validate(self):
         frames = self.data["paths"].get("input_frames") or ""
@@ -278,6 +446,13 @@ class Config(object):
             )
         self.data["acquisition"]["frame_extension"] = ext
 
+        mode = str(self.data["tiltseries_filter"]["mode"]).strip().lower()
+        if mode not in ("exclude", "stop", "off"):
+            raise ConfigError(
+                "tiltseries_filter.mode must be one of exclude/stop/off, "
+                "got %r" % self.data["tiltseries_filter"]["mode"]
+            )
+
     # ------------------------------------------------------------- accessors
     def __getitem__(self, key):
         return self.data[key]
@@ -295,7 +470,23 @@ class Config(object):
 
     @property
     def tilt_split(self):
-        return bool(self.data["tilt_split"]["enabled"])
+        """Whether quality_check measures dedicated TILT-split half maps.
+
+        False (``quality_check.enable_tilt_split: false``) means RESOLVE
+        measures the FRAME-split half maps that are reconstructed anyway for
+        IsoNet, and the extra tilt-split reconstruction is never made at all.
+        """
+        return bool(self.data["quality_check"]["enable_tilt_split"])
+
+    @property
+    def tilt_split_angpix(self):
+        """Pixel size (A) the tilt-split half maps are reconstructed at.
+
+        Deliberately much coarser than ``warptools.recon_angpix``: tilt-split
+        half-tomograms differ from each other far more than frame-split ones
+        do, so RESOLVE's estimate is only meaningful at a coarse pixel size.
+        """
+        return float(self.data["quality_check"]["tilt_split_target_pixel_size"])
 
     @property
     def gpus(self):
@@ -306,6 +497,53 @@ class Config(object):
 
     def exe(self, name):
         return self.data["executables"][name]
+
+    # ------------------------------------------------------- conda wrapping
+    def conda_env(self, name):
+        """The conda/mamba environment *name* should be run in, or "".
+
+        Read from the top-level ``conda_env_<name>`` setting (see
+        :data:`CONDA_WRAPPABLE`), which sits next to ``paths`` rather than
+        inside each program's own section because it is the same question for
+        every one of them.
+        """
+        if name not in CONDA_WRAPPABLE:
+            return ""
+        return str(self.data.get("conda_env_%s" % name) or "").strip()
+
+    def command(self, name, *args):
+        """The argv for running executable *name*, conda-wrapped if configured.
+
+        Every call site in the package goes through this instead of
+        ``exe(name)`` directly, so adding an environment to one program never
+        needs the program's own module to know about it. List/tuple arguments
+        are flattened, so a call can mix plain flags with pre-built argument
+        lists.
+        """
+        argv = [self.exe(name)]
+        for arg in args:
+            if isinstance(arg, (list, tuple)):
+                argv.extend(str(part) for part in arg)
+            else:
+                argv.append(str(arg))
+        env = self.conda_env(name)
+        if not env:
+            return argv
+        return wrap_conda_run(argv, self.exe("conda"), env)
+
+    def require(self, name, purpose):
+        """Warn if *name* cannot be run - checking the right thing.
+
+        When *name* has a conda environment configured it lives inside that
+        environment, not necessarily on the PATH tomo_denoising itself runs
+        with, so looking for it here would just produce a false warning. What
+        actually has to be reachable in that case is conda/mamba.
+        """
+        env = self.conda_env(name)
+        if env:
+            return require_executable(
+                self.exe("conda"), "conda/mamba, to run %s in %r" % (purpose, env))
+        return require_executable(self.exe(name), purpose)
 
     @property
     def gain_name(self):
@@ -437,11 +675,10 @@ class Config(object):
 
     @property
     def mdocs_filtered_dir(self):
-        """Copies of mdocs.preprocessing with tilts that have no WarpTools
-        frame-series data removed - see warptools._sanitize_mdocs. Only
-        created (and only used for ts_import) when at least one mdoc
-        actually needed filtering; mdocs.preprocessing itself is never
-        written to."""
+        """What ts_import reads whenever a tilt was dropped or a tilt series
+        excluded: filtered copies of, and links to, mdocs.preprocessing's
+        mdocs - see warptools._prepare_mdocs. mdocs.preprocessing itself is
+        never written to."""
         return self.sub("mdocs_filtered")
 
     # -------------------------------------------------------- MissAlignment
@@ -466,10 +703,11 @@ class Config(object):
 
     @property
     def missalignment_reconstruction_dir(self):
-        """MissAlignment's own ts_reconstruct scratch location
-        (--output_processing) - deliberately SEPARATE from
-        reconstruction_dir (warp_tiltseries/reconstruction), which
-        reconstruct_tomograms uses for the pre-MissAlignment reconstruction.
+        """MissAlignment's own ts_reconstruct output (one --output_processing
+        per call under it - see warptools.run_ts_reconstruct) - deliberately
+        SEPARATE from reconstruction_dir (warp_tiltseries/reconstruction),
+        which reconstruct_tomograms uses for the pre-MissAlignment
+        reconstruction.
         Sharing one between the two used to mean MissAlignment's later
         reconstruction silently overwrote the physical files
         reconstruct_tomograms's own raw_halfMaps symlinks already pointed

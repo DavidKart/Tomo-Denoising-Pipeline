@@ -1,4 +1,15 @@
-"""Selecting the even/odd half maps belonging to a set of mdoc files."""
+"""Selecting the even/odd half maps belonging to a set of mdoc files.
+
+Two independent choices are made here, and they are easy to confuse:
+
+* WHICH ALIGNMENT - MissAlignment-corrected (``missalignment/``) or plain
+  WarpTools (``warp_tiltseries/``). Whichever exists; MissAlignment wins.
+* WHICH SPLIT - frame-split (``raw_halfMaps``, what IsoNet trains on) or
+  tilt-split (``raw_halfMaps_tiltSplit``). Only ``quality_check`` has a
+  choice here, through ``quality_check.enable_tilt_split``: with it off,
+  RESOLVE measures the frame-split half maps that are reconstructed anyway
+  and the tilt-split reconstruction is never made at all.
+"""
 
 import os
 
@@ -57,7 +68,99 @@ def resolve_tiltsplit_halfmaps_dir(config, log=None):
     return config.tiltsplit_halfmaps_dir
 
 
-def ensure_halfmaps_available(config, log=None, dry_run=False):
+def resolve_quality_check_halfmaps_dir(config, log=None):
+    """Which half maps ``quality_check`` runs RESOLVE over.
+
+    ``quality_check.enable_tilt_split: true`` -> the dedicated tilt-split
+    reconstruction, which exists only for this.
+
+    ``false`` -> the FRAME-split half maps, which are reconstructed anyway for
+    IsoNet. RESOLVE needs two genuinely independent reconstructions of the
+    same volume, and frame-split halves are exactly that - they just differ
+    from each other far less than tilt-split ones, so the resolution it
+    reports is the (more optimistic) frame-split number and is labelled as
+    such everywhere, including in the results figure (see
+    :func:`resolution_label`).
+    """
+    if config.tilt_split:
+        return resolve_tiltsplit_halfmaps_dir(config, log=log)
+    return resolve_frame_halfmaps_dir(config, log=log)
+
+
+def resolution_label(config):
+    """How RESOLVE's number should be named wherever it is shown."""
+    return "Tilt-split resolution" if config.tilt_split else "Frame-split resolution"
+
+
+# ------------------------------------------------ on-demand reconstruction
+
+
+def _reconstruct_missing_tiltsplit(config, log=None, dry_run=False):
+    """Reconstruct ONLY the missing tilt-split half maps, from the alignment
+    the existing frame-split half maps already came from.
+
+    Which destination that is matters: ``run_missalignment`` refines
+    ``warp_tiltseries/<tomo>.xml`` IN PLACE, so reconstructing from
+    ``warp_tiltseries.settings`` now yields the MissAlignment-corrected
+    geometry. Writing that into ``warp_tiltseries/raw_halfMaps_tiltSplit``
+    would file corrected reconstructions under the name this pipeline uses
+    for uncorrected ones - so when MissAlignment's own half maps exist, the
+    tilt-split set belongs next to them, under ``missalignment/``.
+    """
+    from . import warptools
+
+    series_names = warptools.aligned_series_names(config)
+    if not series_names and not dry_run:
+        raise SystemExit(
+            "ERROR: quality_check needs tilt-split half maps "
+            "(quality_check.enable_tilt_split is true) and none exist yet, "
+            "but there are no aligned tilt series (*.xml) in %s to "
+            "reconstruct them from.\n"
+            "Run 'tomo_denoising align_tiltseries' first."
+            % config.warp_tiltseries_dir
+        )
+
+    corrected = (config["missalign"]["enabled"]
+                 and _dir_has_halfmaps(config.missalignment_halfmaps_dir))
+    if corrected:
+        halfmaps_dir = config.missalignment_halfmaps_dir
+        tiltsplit_dir = config.missalignment_tiltsplit_halfmaps_dir
+        reconstruction_dir = config.missalignment_reconstruction_dir
+        logs_dir = config.missalignment_logs_dir
+    else:
+        halfmaps_dir = config.raw_halfmaps_dir
+        tiltsplit_dir = config.tiltsplit_halfmaps_dir
+        reconstruction_dir = config.reconstruction_dir
+        logs_dir = config.logs_dir
+
+    message = ("tilt-split half maps are missing - reconstructing them now "
+               "into %s (at %.1f A, quality_check."
+               "tilt_split_target_pixel_size)"
+               % (tiltsplit_dir, config.tilt_split_angpix))
+    info(message)
+    if log is not None:
+        log.note(message)
+
+    # do_halfmaps=True with do_full=False: the frame-split half maps are
+    # already there, so run_ts_reconstruct skips that call by itself and only
+    # the tilt-split one actually runs. force stays False for the same
+    # reason - this is filling a gap, never redoing finished work.
+    ok = warptools.run_ts_reconstruct(
+        config, config.warp_tiltseries_settings_path,
+        halfmaps_dir, tiltsplit_dir, logs_dir, series_names,
+        warptools.resolve_recon_angpix(config), reconstruction_dir,
+        full_dir=None, do_full=False, do_halfmaps=True, do_tiltsplit=True,
+        log=log, force=False, dry_run=dry_run,
+    )
+    if not ok and not dry_run:
+        raise SystemExit(
+            "ERROR: on-demand tilt-split half-map reconstruction failed - "
+            "see %s" % os.path.join(logs_dir, "ts_reconstruct_tilt.log")
+        )
+
+
+def ensure_halfmaps_available(config, log=None, dry_run=False,
+                              need_tiltsplit=False):
     """On-demand half-map reconstruction for a standalone step.
 
     ``quality_check``/``train_isonet``/``predict_isonet`` may be run on their
@@ -69,18 +172,34 @@ def ensure_halfmaps_available(config, log=None, dry_run=False):
     plain ones now from the uncorrected alignment, so the step has something
     to work with instead of failing outright.
 
-    A no-op whenever either kind already exists - this never re-reconstructs
-    half maps that are already there, and never runs in place of an explicit
-    ``run_missalignment``.
+    *need_tiltsplit* (``quality_check`` passes ``config.tilt_split``) also
+    requires the TILT-split half maps. Those are a separate reconstruction
+    that nothing but RESOLVE uses, so they are commonly absent even when the
+    frame-split ones are there - the whole point of
+    ``quality_check.enable_tilt_split`` is that the pipeline does not make
+    them unless asked. Running ``quality_check`` later with it switched on
+    reconstructs them at that point (see
+    :func:`_reconstruct_missing_tiltsplit`), rather than failing.
+
+    A no-op whenever everything needed already exists - this never
+    re-reconstructs half maps that are already there, and never runs in place
+    of an explicit ``run_missalignment``.
     """
-    if _dir_has_halfmaps(config.missalignment_halfmaps_dir):
-        return
-    if _dir_has_halfmaps(config.raw_halfmaps_dir):
+    have_frame = (_dir_has_halfmaps(config.missalignment_halfmaps_dir)
+                  or _dir_has_halfmaps(config.raw_halfmaps_dir))
+    have_tiltsplit = (
+        _dir_has_halfmaps(config.missalignment_tiltsplit_halfmaps_dir)
+        or _dir_has_halfmaps(config.tiltsplit_halfmaps_dir))
+
+    if have_frame:
+        if need_tiltsplit and not have_tiltsplit:
+            _reconstruct_missing_tiltsplit(config, log=log, dry_run=dry_run)
         return
 
     message = ("no half maps found yet (neither MissAlignment-corrected nor "
-               "plain) - reconstructing raw_halfMaps from the uncorrected "
-               "alignment now")
+               "plain) - reconstructing raw_halfMaps%s from the uncorrected "
+               "alignment now"
+               % ("(_tiltSplit)" if need_tiltsplit else ""))
     info(message)
     if log is not None:
         log.note(message)

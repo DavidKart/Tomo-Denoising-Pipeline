@@ -8,26 +8,35 @@ MissAlignment runs by default - pass ``--skip-missalignment`` to disable it.
 that is a standalone deliverable, not an intermediate towards the half maps.
 Whenever MissAlignment is going to run, it does NOT also reconstruct the
 pre-MissAlignment half maps (``halfmaps=False``) - there is no reason to,
-since ``run_missalignment`` reconstructs its own frame-split (for IsoNet) and
-tilt-split (for RESOLVE) half maps from the refined alignment right after.
+since ``run_missalignment`` reconstructs its own frame-split (for IsoNet) and,
+when ``quality_check.enable_tilt_split`` is set, tilt-split (for RESOLVE) half
+maps from the refined alignment right after.
 Pass ``--produce-intermediates`` to ALSO reconstruct the pre-MissAlignment
 half maps here, alongside MissAlignment's later corrected ones - purely for
 having them on disk to inspect; the two are reconstructed into genuinely
 separate locations (``reconstruct_tomograms`` and ``run_missalignment`` each
 get their own ``--output_processing`` directory), never the same physical
 files under two names. This does NOT change what ``quality_check`` measures:
-RESOLVE is only ever run on the single preferred tilt-split set (MissAlignment's
-once it exists, plain otherwise - see ``halfmap_sets.
-resolve_tiltsplit_halfmaps_dir``), never on the uncorrected one just because
-it happens to exist too, and there is no before/after comparison report. When
-MissAlignment is skipped entirely, the plain-WarpTools half maps are always
-reconstructed here, for ``quality_check``/IsoNet to use directly.
+RESOLVE is only ever run on the single preferred set (MissAlignment's once it
+exists, plain otherwise - see
+``halfmap_sets.resolve_quality_check_halfmaps_dir``), never on the uncorrected
+one just because it happens to exist too, and there is no before/after
+comparison report. When MissAlignment is skipped entirely, the plain-WarpTools
+half maps are always reconstructed here, for ``quality_check``/IsoNet to use
+directly.
+
+Which SPLIT ``quality_check`` measures is ``quality_check.enable_tilt_split``,
+and that is independent of all of the above: with it off, RESOLVE measures the
+frame-split half maps the pipeline reconstructs anyway and no tilt-split
+reconstruction is ever made. With it on but never reconstructed (it was off
+during this project's ``run_pipe`` and has since been switched on),
+``quality_check`` reconstructs the tilt-split half maps itself at that point.
 
 A MissAlignment failure is NOT tolerated: unlike the other steps, silently
 falling back to the uncorrected alignment would be a difficult-to-notice
 change in what actually gets denoised, so ``run_pipe`` stops immediately and
 reports the failure. ``halfmap_sets.resolve_frame_halfmaps_dir``/
-``resolve_tiltsplit_halfmaps_dir`` still prefer MissAlignment's half maps
+``resolve_quality_check_halfmaps_dir`` still prefer MissAlignment's half maps
 whenever they exist, which matters when a step is instead run on its own.
 
 The quality check sits between reconstruction and training on purpose: it is
@@ -41,6 +50,7 @@ after an interruption picks up where it stopped.
 
 import os
 
+from . import tiltfilter
 from .mdoc import find_mdocs
 from .utils import banner, info, warn
 
@@ -152,4 +162,16 @@ def run_pipe(config, skip_quality=False, skip_missalignment=False,
     banner("run_pipe finished")
     info("logs:    %s" % config.logs_dir)
     info("results: %s" % config.processing_dir)
+    _report_excluded(config)
     return 0
+
+
+def _report_excluded(config):
+    """Repeat the excluded tilt series at the very end - decided hours
+    earlier in align_tiltseries, where the note is long scrolled away."""
+    record = tiltfilter.read_record(config)
+    if not record:
+        return
+    warn("%d tilt series were EXCLUDED and not processed (details: %s):\n%s"
+         % (len(record), tiltfilter.record_path(config),
+            "\n".join(tiltfilter.format_record(record))))
