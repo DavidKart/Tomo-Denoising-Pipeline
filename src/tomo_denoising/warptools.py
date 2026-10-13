@@ -932,6 +932,23 @@ def _prepare_mdocs(config, series_list, log, force=False, dry_run=False):
             log.fail(series.name, "no usable tilts (missing frame-series "
                      "data or incomplete mdoc blocks: %s)" % ", ".join(missing))
             continue
+        if missing and not indices:
+            # Print only: says WHY, before tiltseries_filter below reports
+            # the series as having "no usable tilts".
+            frames = [m for m in missing if not m.startswith("[ZValue")]
+            expected = ("; e.g. expected %s" % os.path.join(
+                config.warp_frameseries_dir, "average",
+                os.path.splitext(frames[0])[0] + ".mrc")) if frames else ""
+            shown = ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")
+            message = ("%s: none of its %d tilt(s) is usable - %d have no "
+                       "WarpTools frame-series average, %d an incomplete mdoc "
+                       "block (%s)%s. The frame names come from the mdoc's "
+                       "SubFramePath entries - if those do not match the "
+                       "actual frame file names, no average is ever found."
+                       % (series.name, len(series.tilts), len(frames),
+                          len(missing) - len(frames), shown, expected))
+            warn(message)
+            log.quiet(message)
         if missing and indices:
             warn("%s: %d of %d tilt(s) unusable and dropped (no WarpTools "
                  "frame-series data, or an incomplete mdoc block) - the rest "
