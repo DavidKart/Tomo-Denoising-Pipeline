@@ -22,6 +22,7 @@ layout below ``DENOISE_DIR`` and friends).
 import glob
 import os
 import re
+import time
 
 from . import tiltfilter
 from .halfmap_sets import ensure_halfmaps_available, resolve_frame_halfmaps_dir
@@ -535,6 +536,30 @@ def predict(config, force=None, dry_run=False):
         return _predict(config, log, force=force, dry_run=dry_run)
 
 
+def _write_pixel_size(directory, pixel_size, since, log):
+    """Write *pixel_size* into the header of every tomogram IsoNet predicted
+    into *directory* in this call - IsoNet2 before its voxel-size fix writes
+    1.0. Header only, in place: the volume data is neither read nor
+    rewritten. Only files written since *since*, so results of an earlier
+    run (possibly at another pixel size) are never relabelled."""
+    import mrcfile
+
+    written = 0
+    names = sorted(os.listdir(directory)) if os.path.isdir(directory) else []
+    for name in names:
+        path = os.path.join(directory, name)
+        if (name.endswith(".mrc") and not os.path.islink(path)
+                and os.path.getmtime(path) >= since):
+            try:
+                with mrcfile.mmap(path, mode="r+") as mrc:
+                    mrc.voxel_size = pixel_size
+                written += 1
+            except Exception as exc:
+                warn("%s: pixel size not written to its header (%s)" % (name, exc))
+    log.note("pixel size %.3f A written to the header of %d final tomogram(s)"
+             % (pixel_size, written))
+
+
 def _predict(config, log, force=False, dry_run=False):
     banner("IsoNet prediction")
     config.require("isonet", "IsoNet")
@@ -569,6 +594,7 @@ def _predict(config, log, force=False, dry_run=False):
             else resolve_network(config, "refine_network", REFINE_DIR)
         )
 
+        started = time.time()
         run(config.command("isonet", "predict", star, network,
                            "--output_dir", FINAL_PREDICT_DIR,
                            "--output_prefix", FINAL_PREDICT_PREFIX,
@@ -576,6 +602,9 @@ def _predict(config, log, force=False, dry_run=False):
             cwd=work, env=_gpu_env(config),
             log_file=os.path.join(logs, "predict_refine.log"),
             dry_run=dry_run)
+        if not dry_run:
+            _write_pixel_size(os.path.join(work, FINAL_PREDICT_DIR),
+                              _half_map_pixel_size(config), started, log)
 
     final_dir = os.path.join(work, FINAL_PREDICT_DIR)
     info("IsoNet prediction finished. Final denoised tomograms: %s" % final_dir)
