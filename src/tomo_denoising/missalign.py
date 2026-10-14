@@ -40,21 +40,24 @@ XML IN PLACE:
      missalignment_reconstruction_dir``; one ``--output_processing`` per
      ts_reconstruct call under it - see
      :func:`warptools.run_ts_reconstruct`) - deliberately NOT the
-     same ``warp_tiltseries/reconstruction/`` ``reconstruct_tomograms``
-     itself uses, since sharing one used to mean this step's reconstruction
-     silently overwrote the physical files raw_halfMaps's symlinks already
-     pointed to.
+     same ``warp_tiltseries/reconstruction_uncorrected/``
+     ``reconstruct_tomograms`` itself uses, since sharing one used to mean
+     this step's reconstruction silently overwrote the physical files
+     raw_halfMaps's symlinks already pointed to.
 
-Everything this step writes lives under
-``<processing_directory>/missalignment/`` and never touches
-``warp_tiltseries/`` - the uncorrected ``tomograms``/``raw_halfMaps``/
-``raw_halfMaps_tiltSplit`` there stay exactly as ``reconstruct_tomograms``
-left them (or are never populated at all, when MissAlignment runs without
-``--produce-intermediates`` - see :mod:`pipeline`). ``missalignment/`` gets
-the SAME three named directories (``tomograms``, ``raw_halfMaps``,
-``raw_halfMaps_tiltSplit``) - a deliberate analogue of ``warp_tiltseries/``'s
-own layout, just MissAlignment-corrected (``raw_halfMaps_tiltSplit`` only
-when ``quality_check.enable_tilt_split`` is set). The half-map ones are what
+Its reconstructions and half maps live under
+``<processing_directory>/missalignment/``; in ``warp_tiltseries/`` it only
+refines the XMLs in place (the point of the step) and adds links: the full
+tomograms in ``warp_tiltseries/tomos_MissAlignment/``, and the same under
+WarpTools' own names in ``warp_tiltseries/reconstruction/``, where its later
+commands look for them. The uncorrected ``tomos_uncorrected``/
+``raw_halfMaps``/``raw_halfMaps_tiltSplit`` there stay exactly as
+``reconstruct_tomograms`` left them (or are never populated at all, when
+MissAlignment runs without ``--produce-intermediates`` - see
+:mod:`pipeline`). ``missalignment/`` gets ``raw_halfMaps`` and
+``raw_halfMaps_tiltSplit`` - the analogue of ``warp_tiltseries/``'s own,
+just MissAlignment-corrected (``raw_halfMaps_tiltSplit`` only when
+``quality_check.enable_tilt_split`` is set). Those half maps are what
 ``halfmap_sets.resolve_frame_halfmaps_dir``/
 ``resolve_quality_check_halfmaps_dir`` prefer by default for denoising and
 quality checking.
@@ -1008,11 +1011,14 @@ def _run(config, log, force=False, dry_run=False):
         config.missalignment_reconstruction_dir,
         full_dir=config.missalignment_tomograms_dir, do_full=True,
         do_tiltsplit=config.tilt_split, log=log, force=force, dry_run=dry_run,
+        warp_links_dir=config.warp_reconstruction_dir,
     )
     if not ok:
         return 1
 
     info("MissAlignment half maps: %s" % config.missalignment_halfmaps_dir)
-    log.note("full tomograms: %s" % config.missalignment_tomograms_dir)
+    log.note("full tomograms: %s (also linked under WarpTools' own names "
+             "in %s)" % (config.missalignment_tomograms_dir,
+                         config.warp_reconstruction_dir))
     log.note("half maps: %s" % config.missalignment_halfmaps_dir)
     return 0 if not log.failed else 1

@@ -32,12 +32,20 @@ Directory layout under ``<processing_directory>``::
     tiltstack/<tomo>/<tomo>.mrc + .rawtlt   ts_stack output
     tiltaxis_search/<tomo>/    OUR OWN scratch alignment-only AreTomo runs -
                                 never mistaken for real project state
-    reconstruction/            ts_reconstruct output, one --output_processing
-                                per call and pixel size (full_<px>/,
-                                frames_<px>/, tilts_<px>/) - the physical
-                                files the links below point at, left where
-                                WarpTools wrote them
-    tomograms/                 symlinks - full, non-split tomogram per series
+    reconstruction_uncorrected/ ts_reconstruct output from the uncorrected
+                                alignment, one --output_processing per call
+                                and pixel size (full_<px>/, frames_<px>/,
+                                tilts_<px>/) - the physical files the links
+                                below point at, left where WarpTools wrote
+                                them
+    tomos_uncorrected/         symlinks - full, non-split tomogram per series
+    tomos_MissAlignment/       symlinks - the same from MissAlignment's
+                                refined alignment (physical files in
+                                missalignment/reconstruction/)
+    reconstruction/            symlinks - the MissAlignment-corrected full
+                                tomograms under WarpTools' own name
+                                (<tomo>_<angpix>Apx.mrc), where its later
+                                commands (ts_template_match, ...) look
     raw_halfMaps/               symlinks - exactly two entries per tomogram
     raw_halfMaps_tiltSplit/     symlinks - the same, tilt-split - made ONLY
                                 when quality_check.enable_tilt_split is true,
@@ -1595,7 +1603,7 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
                        logs_dir, series_names, angpix, reconstruction_dir,
                        full_dir=None, do_full=False,
                        do_halfmaps=True, do_tiltsplit=True, log=None,
-                       force=False, dry_run=False):
+                       force=False, dry_run=False, warp_links_dir=None):
     """Reconstruct the full, non-split tomogram (when *do_full*), frame-split
     half maps (when *do_halfmaps*) and tilt-split half maps (when
     *do_halfmaps* and *do_tiltsplit*), symlinking results into *full_dir* /
@@ -1620,13 +1628,19 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
     full tomogram, WarpTools' own extras) simply stay, as do the
     reconstructions of an earlier pixel size, which are never linked again.
 
+    *warp_links_dir*, if given, also gets a link to every full tomogram
+    under WarpTools' own file name (``<name>_<angpix>Apx.mrc``) - what
+    :mod:`missalign` uses to put the corrected tomograms where WarpTools'
+    later commands (ts_template_match, ...) look for them
+    (``config.warp_reconstruction_dir``).
+
     Shared by :func:`reconstruct_tomograms` (``do_full=True``, *do_halfmaps*
     controlled by its own ``halfmaps``/``--produce-intermediates`` logic -
     see :mod:`pipeline`) and :mod:`missalign` (also ``do_full=True``,
     *do_halfmaps* always true), which reconstruct the SAME
     ``warp_tiltseries`` project (before and after MissAlignment refines its
     alignment in place). The two callers MUST pass DIFFERENT
-    *reconstruction_dir* values (``config.reconstruction_dir`` vs
+    *reconstruction_dir* values (``config.uncorrected_reconstruction_dir`` vs
     ``config.missalignment_reconstruction_dir``) - they used to share one,
     which meant MissAlignment's later reconstruction silently overwrote the
     files reconstruct_tomograms's own raw_halfMaps symlinks already pointed
@@ -1816,6 +1830,11 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
             # force matters here even though the target NAME never changes:
             # what it points at does, as soon as a pixel size changed.
             link_file(source, target, force=force)
+            if half is None and warp_links_dir:
+                # The same full tomogram once more, under WarpTools' own
+                # name, where its later commands look for it.
+                link_file(source, os.path.join(ensure_dir(warp_links_dir), entry),
+                          force=force)
             linked += 1
             matched_names.add(owner)
 
@@ -2014,8 +2033,8 @@ def _reconstruct_tomograms(config, log, force=False, dry_run=False, halfmaps=Tru
     ok = run_ts_reconstruct(
         config, settings_path, config.raw_halfmaps_dir,
         config.tiltsplit_halfmaps_dir, logs, series_names, recon_angpix,
-        config.reconstruction_dir,
-        full_dir=config.tomograms_dir, do_full=True,
+        config.uncorrected_reconstruction_dir,
+        full_dir=config.uncorrected_tomograms_dir, do_full=True,
         do_halfmaps=halfmaps, do_tiltsplit=config.tilt_split,
         log=log, force=force, dry_run=dry_run,
     )
@@ -2023,7 +2042,7 @@ def _reconstruct_tomograms(config, log, force=False, dry_run=False, halfmaps=Tru
         return 1
 
     log.note("")
-    log.note("full tomograms:        %s" % config.tomograms_dir)
+    log.note("full tomograms:        %s" % config.uncorrected_tomograms_dir)
     if halfmaps:
         log.note("frame-split half maps: %s" % config.raw_halfmaps_dir)
         if config.tilt_split:

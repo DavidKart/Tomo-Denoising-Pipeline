@@ -587,15 +587,12 @@ class Config(object):
         return bool(self.data.get("overwrite", False))
 
     @property
-    def tomograms_dir(self):
-        """Full, non-split reconstructions - always produced by
-        reconstruct_tomograms, independent of whether half maps are. Lives
-        under warp_tiltseries/ (not directly under processing_directory) so
-        the layout is the analogue of missalignment_tomograms_dir - both
-        stages produce the same three named directories
-        (tomograms/raw_halfMaps/raw_halfMaps_tiltSplit), one uncorrected,
-        one MissAlignment-corrected."""
-        return self.sub("warp_tiltseries", "tomograms")
+    def uncorrected_tomograms_dir(self):
+        """Links to the full, non-split tomograms reconstructed from the
+        uncorrected (pre-MissAlignment) alignment - always produced by
+        reconstruct_tomograms, independent of whether half maps are. Next to
+        missalignment_tomograms_dir (tomos_MissAlignment/)."""
+        return self.sub("warp_tiltseries", "tomos_uncorrected")
 
     @property
     def raw_halfmaps_dir(self):
@@ -670,7 +667,20 @@ class Config(object):
         return self.sub("warp_tiltseries", "tiltaxis_search")
 
     @property
-    def reconstruction_dir(self):
+    def uncorrected_reconstruction_dir(self):
+        """reconstruct_tomograms' own ts_reconstruct output (one
+        --output_processing per call under it - see
+        warptools.run_ts_reconstruct): the physical files
+        uncorrected_tomograms_dir and raw_halfMaps*/ link to."""
+        return self.sub("warp_tiltseries", "reconstruction_uncorrected")
+
+    @property
+    def warp_reconstruction_dir(self):
+        """WarpTools' OWN reconstruction folder for this project
+        (<processing folder>/reconstruction/), where its later commands -
+        ts_template_match, for one - look for <name>_<angpix>Apx.mrc. Holds
+        only links, to the MissAlignment-corrected full tomograms, under
+        exactly that WarpTools name."""
         return self.sub("warp_tiltseries", "reconstruction")
 
     @property
@@ -688,10 +698,11 @@ class Config(object):
 
     @property
     def missalignment_tomograms_dir(self):
-        """MissAlignment's own full, non-split reconstruction - the
-        analogue of tomograms_dir, from the refined alignment instead of the
-        native one."""
-        return self.sub("missalignment", "tomograms")
+        """Links to MissAlignment's full, non-split tomograms - the analogue
+        of uncorrected_tomograms_dir, from the refined alignment instead of
+        the native one. Under warp_tiltseries/, next to it; the physical
+        files stay in missalignment_reconstruction_dir."""
+        return self.sub("warp_tiltseries", "tomos_MissAlignment")
 
     @property
     def missalignment_halfmaps_dir(self):
@@ -705,9 +716,8 @@ class Config(object):
     def missalignment_reconstruction_dir(self):
         """MissAlignment's own ts_reconstruct output (one --output_processing
         per call under it - see warptools.run_ts_reconstruct) - deliberately
-        SEPARATE from reconstruction_dir (warp_tiltseries/reconstruction),
-        which reconstruct_tomograms uses for the pre-MissAlignment
-        reconstruction.
+        SEPARATE from uncorrected_reconstruction_dir, which
+        reconstruct_tomograms uses for the pre-MissAlignment reconstruction.
         Sharing one between the two used to mean MissAlignment's later
         reconstruction silently overwrote the physical files
         reconstruct_tomograms's own raw_halfMaps symlinks already pointed

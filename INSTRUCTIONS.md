@@ -66,19 +66,23 @@ touched, forced or not.
    skipped by default when MissAlignment is about to run right after (step 5
    reconstructs its own instead) - the full tomogram is reconstructed either
    way. Run on its own, they are always reconstructed.
-   → `warp_tiltseries/tomograms/`, `warp_tiltseries/raw_halfMaps/`,
-   `warp_tiltseries/raw_halfMaps_tiltSplit/`
+   → `warp_tiltseries/tomos_uncorrected/`, `warp_tiltseries/raw_halfMaps/`,
+   `warp_tiltseries/raw_halfMaps_tiltSplit/` (links; the files themselves are
+   in `warp_tiltseries/reconstruction_uncorrected/`)
 
 5. **`run_missalignment`** *(runs by default as part of `run_pipe`; skip with
    `--skip-missalignment` or `missalign.enabled: false`)* — refines each
    tilt series' alignment in place with MissAlignment's local deformation
    model, then reconstructs the full tomogram and both half-map kinds from
-   the refined alignment - the same three directories as step 4, just under
-   `missalignment/`. Once populated, its half maps are preferred
-   automatically over `warp_tiltseries/raw_halfMaps*` everywhere downstream.
-   A failure here stops `run_pipe` rather than falling back to the
-   uncorrected alignment silently.
-   → `missalignment/tomograms/`, `missalignment/raw_halfMaps*`
+   the refined alignment, into `missalignment/`. Once populated, its half
+   maps are preferred automatically over `warp_tiltseries/raw_halfMaps*`
+   everywhere downstream. A failure here stops `run_pipe` rather than
+   falling back to the uncorrected alignment silently.
+   → `warp_tiltseries/tomos_MissAlignment/`, `missalignment/raw_halfMaps*`
+   (links; the files themselves are in `missalignment/reconstruction/`). The
+   full tomograms are also linked under WarpTools' own names
+   (`<tomo>_<angpix>Apx.mrc`) in `warp_tiltseries/reconstruction/`, where
+   WarpTools' later commands such as `ts_template_match` look for them.
 
 6. **`quality_check`** — runs RESOLVE over a set of even/odd half maps
    (whichever alignment is preferred - see step 5) to estimate resolution and

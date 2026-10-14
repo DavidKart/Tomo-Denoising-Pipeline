@@ -82,21 +82,24 @@ paths:
   #     warp_tiltseries.settings / warp_tiltseries/      <- alignment + recon
   #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3)
   #       tiltstack/<tomo>/     ts_stack output
-  #       reconstruction/       ts_reconstruct output, one folder per call and
+  #       reconstruction_uncorrected/  ts_reconstruct output from the
+  #                             uncorrected alignment, one folder per call and
   #                             pixel size (full_<px>, frames_<px>, tilts_<px>)
-  #                             - the files tomograms/ and raw_halfMaps*/ link
-  #                             to. Reconstructions at an earlier pixel size
-  #                             stay here (never linked again) until you
-  #                             remove them.
-  #       tomograms/            full, non-split tomograms (always made)
+  #                             - the files tomos_uncorrected/ and
+  #                             raw_halfMaps*/ link to. 
+  #       tomos_uncorrected/    full tomograms, uncorrected alignment (links)
+  #       tomos_MissAlignment/  full tomograms, MissAlignment-refined (links)
+  #       reconstruction/       the MissAlignment-refined full tomograms again,
+  #                             linked under WarpTools' own names
+  #                             (<tomo>_<angpix>Apx.mrc) - where WarpTools'
+  #                             later commands (ts_template_match, ...) look.
   #       raw_halfMaps/         every even_/odd_ half map produced
   #       raw_halfMaps_tiltSplit/  tilt-split half maps - only made when
   #                                quality_check.enable_tilt_split is true
   #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
-  #     missalignment/             <- MissAlignment-refined reconstructions,
-  #                                   the SAME three directories as above
-  #                                   (reconstruction/, tomograms/,
-  #                                   raw_halfMaps/, raw_halfMaps_tiltSplit/)
+  #     missalignment/             <- MissAlignment-refined reconstructions
+  #                                   (reconstruction/) and half maps
+  #                                   (raw_halfMaps/, raw_halfMaps_tiltSplit/)
   #                                   - preferred by default once populated
   #     isonet_config/    <- the IsoNet star files
   #     isonet/            <- IsoNet working directory (networks, masks, output)

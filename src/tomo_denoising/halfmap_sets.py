@@ -130,7 +130,7 @@ def _reconstruct_missing_tiltsplit(config, log=None, dry_run=False):
     else:
         halfmaps_dir = config.raw_halfmaps_dir
         tiltsplit_dir = config.tiltsplit_halfmaps_dir
-        reconstruction_dir = config.reconstruction_dir
+        reconstruction_dir = config.uncorrected_reconstruction_dir
         logs_dir = config.logs_dir
 
     message = ("tilt-split half maps are missing - reconstructing them now "
