@@ -604,7 +604,8 @@ def _predict(config, log, force=False, dry_run=False):
             dry_run=dry_run)
         if not dry_run:
             _write_pixel_size(os.path.join(work, FINAL_PREDICT_DIR),
-                              _half_map_pixel_size(config), started, log)
+                              _half_map_pixel_size(config, series_list[0]),
+                              started, log)
 
     final_dir = os.path.join(work, FINAL_PREDICT_DIR)
     info("IsoNet prediction finished. Final denoised tomograms: %s" % final_dir)

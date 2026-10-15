@@ -75,8 +75,9 @@ DEFAULTS = {
         "amplitude_contrast": 0.1,
     },
     "frameseries": {
-        # log2 Fourier binning WarpTools applies when producing averages
-        # (WarpTools' own --bin convention: 0 = none, 1 = bin by 2, ...).
+        # log2 Fourier binning WarpTools applies when loading raw data
+        # (WarpTools' own --bin convention: 0 = none, 1 = bin by 2, ...) -
+        # passed to BOTH create_settings calls, frame series and tilt series.
         "bin": 0,
         # Dose PER TILT, e-/A^2 - WarpTools needs this explicitly for its own
         # dose-weighting; MotionCor3 never needed it, so this is new.

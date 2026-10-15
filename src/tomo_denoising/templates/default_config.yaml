@@ -274,8 +274,12 @@ acquisition:
 # -----------------------------------------------------------------------------
 frameseries:
 
-  # WarpTools' own log2 Fourier binning of the motion-corrected averages.
-  # 0 = no binning, 1 = bin by 2, 2 = bin by 4, ...
+  # WarpTools' own log2 Fourier binning (--bin), applied when loading the raw
+  # data: 0 = no binning, 1 = bin by 2, 2 = bin by 4, ...
+  # Used for BOTH settings files - the motion-corrected averages here, and
+  # the tilt series (ts_ctf, ts_defocus_hand work at this binning). 
+  # The binned pixel size (pixel_size x 2^bin) must stay below half of
+  # c_range_max and warptools.ts_ctf_range_high.
   bin: 0
 
   # Dose PER TILT, in e-/A^2. WarpTools needs this explicitly for its own
@@ -402,7 +406,7 @@ warptools:
   # Pixel size (A) for ts_stack, this pipeline's own axis-search AreTomo
   # calls, and native ts_aretomo3 - coarser than the final reconstruction, as
   # is normal for alignment.
-  align_angpix: 2*pixel_size
+  align_angpix: 2*pixel_size # should be > pixel_size * 2^frameseries.bin
 
   # Final reconstruction pixel size (A), for ts_reconstruct. Also what the
   # half maps' voxel size is taken to be everywhere downstream (IsoNet, ...).
@@ -416,7 +420,7 @@ warptools:
   # and the result is verified. false: they are only reported.
   auto_fix_defocus_hand: true
 
-  ts_ctf_range_high: 7.0 # needs be > 2*align_angpix
+  ts_ctf_range_high: 7.0 # needs be > 2 * pixel_size * 2^frameseries.bin
   ts_ctf_defocus_max: 8.0 # max defocus to be considered
 
   # How many tilt series WarpTools reconstructs/aligns at once, per GPU.

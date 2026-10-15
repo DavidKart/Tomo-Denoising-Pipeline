@@ -1205,6 +1205,51 @@ def alignment_id(config):
 # -------------------------------------------------------------- entrypoint
 
 
+def _check_ctf_binning(config, apix, log):
+    """Stop if ts_ctf could not fit up to ts_ctf_range_high at the binned
+    pixel size the tilt-series settings give it (unbinned pixel size x
+    2^frameseries.bin): Nyquist (2 x pixel size) must stay below it."""
+    fs_bin = int(config["frameseries"]["bin"])
+    binned = apix * (2 ** fs_bin)
+    range_high = float(config["warptools"]["ts_ctf_range_high"])
+    if range_high <= 2 * binned:
+        raise SystemExit(
+            "ERROR: warptools.ts_ctf_range_high (%.2f A) must be above the "
+            "Nyquist limit of the binned tilt images, 2 x %.4f A (unbinned "
+            "%.4f A x 2^frameseries.bin %d) = %.2f A - ts_ctf could not fit "
+            "the CTF that far. Raise ts_ctf_range_high, or lower "
+            "frameseries.bin." % (range_high, binned, apix, fs_bin, 2 * binned))
+    log.note("tilt-series binning: frameseries.bin %d -> %.4f A per pixel for "
+             "ts_ctf/ts_defocus_hand (ts_ctf_range_high %.2f A)"
+             % (fs_bin, binned, range_high))
+
+
+def _warn_settings_binning(config, settings_path, log):
+    """Warn if an EXISTING tilt-series settings file was made with another
+    binning than frameseries.bin (e.g. by a pipeline version that did not
+    bin it at all) - print only, nothing is changed."""
+    try:
+        with open(settings_path, encoding="utf-8", errors="replace") as handle:
+            found = re.search(r'Name="BinTimes"\s+Value="([^"]*)"', handle.read())
+    except OSError:
+        return
+    if not found:
+        return
+    try:
+        existing = float(found.group(1))
+    except ValueError:
+        return
+    wanted = int(config["frameseries"]["bin"])
+    if existing != wanted:
+        message = ("%s uses BinTimes %g, but frameseries.bin is %d - ts_ctf "
+                   "and ts_defocus_hand load the tilts at that other binning "
+                   "(BinTimes 0: full size, a lot of RAM). It is only "
+                   "recreated by align_tiltseries --force; or change its "
+                   "BinTimes value by hand." % (settings_path, existing, wanted))
+        warn(message)
+        log.quiet(message)
+
+
 def align_tiltseries(config, force=None, dry_run=False):
     """``tomo_denoising align_tiltseries``"""
     force = config.overwrite if force is None else force
@@ -1329,6 +1374,7 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
     # --- 2. create_settings (tilt series) -------------------------------
     banner("align_tiltseries 2/5  create_settings (tilt series)")
     settings_path = config.warp_tiltseries_settings_path
+    _check_ctf_binning(config, apix, log)
 
     if force or not os.path.isfile(settings_path):
         x, y, z = resolve_tomo_dimensions(config, series_list, log,
@@ -1340,6 +1386,12 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
             "--folder_processing", config.warp_tiltseries_dir,
             "--extension", "*.tomostar",
             "--angpix", "%.4f" % apix,
+            # The same binning as the frame series (the documented pattern:
+            # one --bin in both settings files). Without it, ts_ctf and
+            # ts_defocus_hand - which take no pixel size of their own - load
+            # every tilt at the UNBINNED size, scaling binned averages back
+            # up: about 40 GB per WarpTools worker on large cameras.
+            "--bin", str(int(fs["bin"])),
             "--exposure", "%.4f" % float(fs["exposure"]),
             "--tomo_dimensions", "%dx%dx%d" % (x, y, z),
         )
@@ -1358,6 +1410,7 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
         log.note("tomo_dimensions: %dx%dx%d (unbinned px)" % (x, y, z))
     else:
         log.note("%s already exists - skipping create_settings" % settings_path)
+        _warn_settings_binning(config, settings_path, log)
 
     # --- 3. ts_stack ------------------------------------------------------
     banner("align_tiltseries 3/5  ts_stack")
