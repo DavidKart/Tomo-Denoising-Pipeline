@@ -96,6 +96,10 @@ paths:
   #       raw_halfMaps/         every even_/odd_ half map produced
   #       raw_halfMaps_tiltSplit/  tilt-split half maps - only made when
   #                                quality_check.enable_tilt_split is true
+  #       inverted_half-maps_IsoNet2/   contrast-inverted copies of the half
+  #       inverted_half-maps_uncorrected_IsoNet2/   maps IsoNet uses (from
+  #                             MissAlignment / uncorrected): IsoNet2 expects
+  #                             dark features.
   #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
   #     missalignment/             <- MissAlignment-refined reconstructions
   #                                   (reconstruction/) and half maps

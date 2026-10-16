@@ -18,7 +18,10 @@ from .utils import info, warn
 
 
 def _dir_has_halfmaps(directory):
-    return os.path.isdir(directory) and any(os.scandir(directory))
+    if not os.path.isdir(directory):
+        return False
+    with os.scandir(directory) as entries:
+        return any(entries)
 
 
 def resolve_frame_halfmaps_dir(config, log=None):

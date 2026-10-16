@@ -604,6 +604,19 @@ class Config(object):
         return self.sub("warp_tiltseries", "raw_halfMaps_tiltSplit")
 
     @property
+    def inverted_halfmaps_dir(self):
+        """Contrast-inverted copies of the MissAlignment half maps, made for
+        IsoNet2 (which expects dark features; WarpTools reconstructs them
+        bright) - see isonet._linked_half_maps."""
+        return self.sub("warp_tiltseries", "inverted_half-maps_IsoNet2")
+
+    @property
+    def inverted_uncorrected_halfmaps_dir(self):
+        """The same for the uncorrected half maps (raw_halfMaps), when
+        IsoNet2 runs on those."""
+        return self.sub("warp_tiltseries", "inverted_half-maps_uncorrected_IsoNet2")
+
+    @property
     def logs_dir(self):
         return self.sub("logs")
 

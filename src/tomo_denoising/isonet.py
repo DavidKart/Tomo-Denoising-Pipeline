@@ -72,14 +72,100 @@ FINAL_PREDICT_PREFIX = "final_"
 # ------------------------------------------------------------------ half maps
 
 
+def _invert_mrc(source, target):
+    """Write *source* multiplied by -1 to *target*: same data type, same
+    pixel size and origin. Slice by slice through memory maps, so a whole
+    tomogram is never held in RAM; written beside *target* and swapped in
+    at the end, so an interrupted run never leaves a half-written file."""
+    import mrcfile
+
+    temp = target + ".tmp"
+    with mrcfile.mmap(source, mode="r", permissive=True) as src:
+        with mrcfile.new_mmap(temp, shape=src.data.shape,
+                              mrc_mode=int(src.header.mode),
+                              overwrite=True) as dst:
+            for z in range(src.data.shape[0]):
+                dst.data[z] = -src.data[z]
+            dst.voxel_size = src.voxel_size
+            dst.header.origin = src.header.origin
+            # Statistics from the source header instead of recomputing them
+            # over the whole volume: inverting swaps and negates min/max and
+            # negates the mean; the RMS deviation is unchanged.
+            dst.header.dmin = -src.header.dmax
+            dst.header.dmax = -src.header.dmin
+            dst.header.dmean = -src.header.dmean
+            dst.header.rms = src.header.rms
+    os.replace(temp, target)
+
+
+def _inverted_half_maps(config, source_dir, series_list, log=None,
+                        dry_run=False):
+    """The directory of contrast-inverted copies of *source_dir*'s half
+    maps, for IsoNet2 - made here, on first use, for *series_list* only.
+
+    IsoNet2 expects features DARK: its mask keeps the darkest voxels
+    (``maxmask`` filters ``-tomo``), training normalises as
+    ``(mean - subvolume) / std``, and predict inverts in and back out.
+    WarpTools' ts_reconstruct inverts contrast by default (features
+    bright), so its half maps are inverted once (x -1) before IsoNet sees
+    them. IsoNet's output keeps its input's convention - the final
+    tomograms have dark features.
+
+    One directory per source (MissAlignment-corrected or uncorrected), same
+    file names. An inverted copy older than its half map (reconstructed
+    again since) is recreated, with a message - checked here only, i.e. on
+    every IsoNet run.
+    """
+    corrected = (os.path.abspath(source_dir)
+                 == os.path.abspath(config.missalignment_halfmaps_dir))
+    target_dir = (config.inverted_halfmaps_dir if corrected
+                  else config.inverted_uncorrected_halfmaps_dir)
+    if dry_run:
+        info("contrast-inverted half maps for IsoNet2 would be made in %s"
+             % target_dir)
+        return target_dir
+    ensure_dir(target_dir)
+    made, renewed = 0, []
+    for series in series_list:
+        for half in ("even", "odd"):
+            name = "%s_%s_rec_tomo.mrc" % (half, series.name)
+            source = os.path.join(source_dir, name)
+            target = os.path.join(target_dir, name)
+            if not os.path.exists(source):
+                continue
+            if os.path.isfile(target):
+                if os.path.getmtime(target) >= os.path.getmtime(source):
+                    continue
+                renewed.append(name)
+            else:
+                made += 1
+            _invert_mrc(source, target)
+    if made:
+        message = ("inverted the contrast of %d half map(s) for IsoNet2 "
+                   "(features dark) into %s" % (made, target_dir))
+        info(message)
+        if log is not None:
+            log.note(message)
+    if renewed:
+        message = ("%d inverted half map(s) in %s were older than their half "
+                   "maps (reconstructed again since) - recreated: %s"
+                   % (len(renewed), target_dir, ", ".join(renewed)))
+        warn(message)
+        if log is not None:
+            log.note(message)
+    return target_dir
+
+
 def _linked_half_maps(config, series_list, subset, log=None, force=False,
                       dry_run=False):
     """Link the half maps of *series_list* into ``isonet/<subset>/{even,odd}``.
 
     Both halves are linked under the SAME base name (``<tomo>.mrc``) so that
     IsoNet pairs them unambiguously regardless of how it matches the two
-    directories. Linking avoids copying tens of gigabytes and never touches
-    the source half maps.
+    directories. What is linked are contrast-inverted copies of the half
+    maps (:func:`_inverted_half_maps`): IsoNet2 expects dark features,
+    WarpTools reconstructs them bright. The half maps themselves are never
+    touched.
 
     Sourced from ``halfmap_sets.resolve_frame_halfmaps_dir`` - the
     MissAlignment-corrected half maps by default, falling back to
@@ -91,11 +177,10 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
     The returned list is sorted by tomogram name, which is the order
     ``prepare_star`` sees the linked files in.
 
-    *force* re-points links that already exist. It matters for two real
-    cases, both of which leave the link NAME unchanged while changing what it
-    should resolve to: a forced re-reconstruction at a different
-    ``warptools.recon_angpix``, and MissAlignment's half maps appearing where
-    a previous run linked the plain ones.
+    Existing links are always re-pointed if they resolve elsewhere: a
+    previous run may have linked the plain half maps (before MissAlignment's
+    appeared), or the uninverted ones (before the inversion existed). *force*
+    no longer changes that.
     """
     ensure_halfmaps_available(config, log=log, dry_run=dry_run)
 
@@ -110,11 +195,20 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
         if not (os.path.exists(even) and os.path.exists(odd)):
             warn("no half maps for %s - excluded from IsoNet." % series.name)
             continue
-        link_file(even, os.path.join(even_dir, series.name + ".mrc"),
-                  force=force)
-        link_file(odd, os.path.join(odd_dir, series.name + ".mrc"),
-                  force=force)
         usable.append(series)
+
+    inverted_dir = _inverted_half_maps(config, source_dir, usable, log=log,
+                                       dry_run=dry_run)
+    if not dry_run:
+        for series in usable:
+            for half, half_dir in (("even", even_dir), ("odd", odd_dir)):
+                # Always re-pointed if it points elsewhere (samefile check in
+                # link_file makes this a no-op otherwise): links from before
+                # the inversion existed point at the bright-feature maps.
+                link_file(os.path.join(inverted_dir, "%s_%s_rec_tomo.mrc"
+                                       % (half, series.name)),
+                          os.path.join(half_dir, series.name + ".mrc"),
+                          force=True)
 
     if not usable:
         raise SystemExit(

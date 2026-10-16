@@ -108,7 +108,11 @@ touched, forced or not.
 7. **`train_isonet`** / **`predict_isonet`** — IsoNet training (on
    `mdocs.train`) and prediction (on `mdocs.predict`): denoise, mask,
    missing-wedge refine, then apply the refined network to the prediction
-   set.
+   set. IsoNet2 expects dark features, while WarpTools reconstructs them
+   bright, so IsoNet works on contrast-inverted copies of the half maps
+   (`warp_tiltseries/inverted_half-maps_IsoNet2/`, or
+   `…_uncorrected_IsoNet2/` without MissAlignment), made the first time
+   IsoNet needs them. The final tomograms therefore have dark features.
    → `isonet/corrected_tomos_final/` (the final deliverable)
 
 ## Run everything at once
