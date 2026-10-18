@@ -287,6 +287,7 @@ def _motion_correct(config, log, force=False, dry_run=False):
                  "Use --force to redo it." % frameseries_dir)
         return 0
 
+    config.require_input_frames()
     log.note(gpu_id_note("warptools", config.gpus))
 
     gain = config.resolve_gain()

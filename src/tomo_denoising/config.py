@@ -189,12 +189,14 @@ DEFAULTS = {
     },
     "missalign": {
         "enabled": True,
-        # "XxYxZ" (unbinned px, same convention as tomo_dimensions) to
-        # tighten the volume MissAlignment trains against so it does not
-        # spend capacity on empty margins - see MissAlignment's own docs.
-        # Leave empty (default) to train against the same dimensions as the
-        # final reconstruction (tomo_dimensions).
-        "training_volume_dimensions": "",
+        # The volume MissAlignment trains against, unbinned px - the same
+        # layout as tomo_dimensions ("XxY" and Z). Set to tighten it so it
+        # does not spend capacity on empty margins (see MissAlignment's own
+        # docs). Each one left empty takes tomo_dimensions' own value.
+        "training_volume_dimensions": {
+            "xy": "",
+            "z": "",
+        },
         # VRAM per GPU, in GB. >= 24 uses MissAlignment's own reference
         # settings unchanged; anything lower selects the low-memory profile
         # (see missalign._memory_profile), which is what makes the step run
@@ -415,6 +417,30 @@ class Config(object):
                      "to silence this." % (self.source, "; ".join(moved)))
             self.data.pop("tilt_split", None)
 
+        # missalign.training_volume_dimensions used to be ONE "XxYxZ" string;
+        # it is now {xy, z} like tomo_dimensions. A string still found here
+        # (an earlier 1.1.0 config) is split into the two.
+        legacy_dims = (raw.get("missalign") or {}).get("training_volume_dimensions")
+        if not isinstance(legacy_dims, dict) and legacy_dims is not None:
+            text = str(legacy_dims).strip()
+            parts = text.lower().split("x")
+            converted = {"xy": "", "z": ""}
+            if len(parts) == 3:
+                converted = {"xy": "%sx%s" % (parts[0], parts[1]), "z": parts[2]}
+            elif text:
+                raise ConfigError(
+                    "missalign.training_volume_dimensions in %s is %r - it now "
+                    "takes xy and z separately, like tomo_dimensions:\n"
+                    "  training_volume_dimensions:\n    xy: \"XxY\"\n    z: Z"
+                    % (self.source, text))
+            self.data["missalign"]["training_volume_dimensions"] = converted
+            if text:
+                warn("%s sets missalign.training_volume_dimensions as one "
+                     "string (%r); it now takes xy and z separately, like "
+                     "tomo_dimensions. Using xy %r, z %r for now - update the "
+                     "config to silence this."
+                     % (self.source, text, converted["xy"], converted["z"]))
+
         legacy_env = str((raw.get("missalign") or {}).get("conda_env") or "").strip()
         if legacy_env and not str(raw.get("conda_env_missalign") or "").strip():
             self.data["conda_env_missalign"] = legacy_env
@@ -423,20 +449,11 @@ class Config(object):
                  "silence this." % self.source)
 
     def _validate(self):
-        frames = self.data["paths"].get("input_frames") or ""
         processing = self.data["paths"].get("processing_directory") or ""
 
         if not processing.strip() or processing.startswith("/path/to"):
             raise ConfigError(
                 "paths.processing_directory is not set in %s" % self.source
-            )
-        if not frames.strip() or frames.startswith("/path/to"):
-            raise ConfigError(
-                "paths.input_frames is not set in %s" % self.source
-            )
-        if not os.path.isdir(frames):
-            raise ConfigError(
-                "paths.input_frames does not exist: %s" % frames
             )
 
         ext = str(self.data["acquisition"]["frame_extension"]).lower().lstrip(".")
@@ -464,6 +481,22 @@ class Config(object):
     @property
     def input_frames(self):
         return os.path.abspath(self.data["paths"]["input_frames"])
+
+    def require_input_frames(self):
+        """Stop unless paths.input_frames is set and exists.
+
+        Checked only where the raw frames are actually read - motion
+        correction - not on every command: later steps never touch them (the
+        one exception, IMOD's pixel-size fallback, reports a missing frame
+        itself), so they keep working where the frames are not reachable.
+        """
+        frames = str(self.data["paths"].get("input_frames") or "").strip()
+        if not frames or frames.startswith("/path/to"):
+            raise SystemExit("ERROR: paths.input_frames is not set in %s"
+                             % self.source)
+        if not os.path.isdir(frames):
+            raise SystemExit("ERROR: paths.input_frames does not exist: %s"
+                             % frames)
 
     @property
     def processing_dir(self):

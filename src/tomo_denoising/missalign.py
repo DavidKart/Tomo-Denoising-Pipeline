@@ -625,25 +625,35 @@ def _patch_dimensions_attr(text, attr_name, value):
 def resolve_training_dimensions(config, series_list, log, dry_run=False):
     """(X, Y, Z) unbinned pixels to patch every XML's dimensions to.
 
-    ``missalign.training_volume_dimensions`` if set explicitly (to
-    deliberately tighten the volume MissAlignment trains against - see
-    MissAlignment's own docs: "the tomogram shape should tightly fit your
-    sample ... to avoid training on empty regions"); otherwise the same
-    ``tomo_dimensions`` ``align_tiltseries`` already resolved for
-    ``--tomo_dimensions``, so every XML ends up consistent with what the
-    project was actually created with.
+    ``missalign.training_volume_dimensions`` - ``xy`` ("XxY") and ``z``,
+    each independently - where set explicitly (to deliberately tighten the
+    volume MissAlignment trains against - see MissAlignment's own docs: "the
+    tomogram shape should tightly fit your sample ... to avoid training on
+    empty regions"); whichever is left empty takes the same value
+    ``align_tiltseries`` already resolved for ``--tomo_dimensions``, so every
+    XML ends up consistent with what the project was actually created with.
     """
-    raw = str(config["missalign"]["training_volume_dimensions"] or "").strip()
-    if not raw:
-        return resolve_tomo_dimensions(config, series_list, log, dry_run=dry_run)
-    try:
-        x_str, y_str, z_str = raw.lower().split("x")
-        return int(x_str), int(y_str), int(z_str)
-    except ValueError:
-        raise SystemExit(
-            "ERROR: missalign.training_volume_dimensions must be 'XxYxZ', "
-            "got %r" % raw
-        )
+    dims = config["missalign"]["training_volume_dimensions"]
+    raw_xy = str(dims.get("xy") or "").strip()
+    raw_z = str(dims.get("z") or "").strip()
+    if not (raw_xy and raw_z):
+        x, y, z = resolve_tomo_dimensions(config, series_list, log, dry_run=dry_run)
+    if raw_xy:
+        try:
+            x_str, y_str = raw_xy.lower().split("x")
+            x, y = int(x_str), int(y_str)
+        except ValueError:
+            raise SystemExit(
+                "ERROR: missalign.training_volume_dimensions.xy must be 'XxY' "
+                "(or empty for tomo_dimensions.xy), got %r" % raw_xy)
+    if raw_z:
+        try:
+            z = int(float(raw_z))
+        except ValueError:
+            raise SystemExit(
+                "ERROR: missalign.training_volume_dimensions.z must be a "
+                "number (or empty for tomo_dimensions.z), got %r" % raw_z)
+    return x, y, z
 
 
 def resolve_image_dimensions(config, series_list, log, dry_run=False):

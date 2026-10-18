@@ -408,8 +408,7 @@ warptools:
   tilt_offset: ""
 
   # Pixel size (A) for ts_stack, this pipeline's own axis-search AreTomo
-  # calls, and native ts_aretomo3 - coarser than the final reconstruction, as
-  # is normal for alignment.
+  # calls, and native ts_aretomo3.
   align_angpix: 2*pixel_size # should be > pixel_size * 2^frameseries.bin
 
   # Final reconstruction pixel size (A), for ts_reconstruct. Also what the
@@ -428,9 +427,6 @@ warptools:
   ts_ctf_defocus_max: 8.0 # max defocus to be considered
 
   # How many tilt series WarpTools reconstructs/aligns at once, per GPU.
-  # Which GPUs is not set here - it comes from the top-level 'gpus' list, as
-  # for every other program (passed as WarpTools' own --device_list where the
-  # subcommand supports it, on top of CUDA_VISIBLE_DEVICES).
   perdevice: 1
 
 
@@ -451,9 +447,7 @@ warptools:
 #  shared half-map directories (halfMaps/, halfMaps_tiltSplit/) mirroring
 #  raw_halfMaps/raw_halfMaps_tiltSplit. Once populated, IsoNet training/
 #  prediction and quality_check use the MissAlignment-corrected halfMaps(_
-#  tiltSplit)/ instead of raw_halfMaps(_tiltSplit)/ BY DEFAULT - this
-#  preference only checks whether the half maps exist, not how/whether this
-#  run itself produced them.
+#  tiltSplit)/ instead of raw_halfMaps(_tiltSplit)/ BY DEFAULT.
 #
 #  If it was never run (or enabled: false below) and neither half-map kind
 #  exists yet, running quality_check or IsoNet directly reconstructs
@@ -463,12 +457,14 @@ missalign:
 
   enabled: true
 
-  # "XxYxZ" (unbinned px, same convention as tomo_dimensions) to tighten the
-  # volume MissAlignment trains against so it does not spend capacity on
-  # empty margins.
-  # Leave empty (default) to train against the same dimensions as the final
-  # reconstruction (tomo_dimensions).
-  training_volume_dimensions: ""
+  # The volume MissAlignment trains against, in unbinned px - the same layout
+  # and convention as tomo_dimensions. Set it to tighten the volume, so
+  # training does not spend capacity on empty margins.
+  # Each value left empty ("", the default) takes tomo_dimensions' own, so
+  # e.g. only z can be tightened.
+  training_volume_dimensions:
+    xy: ""     # e.g. "4000x5600"
+    z: ""      # e.g. 600. Should probably be smaller than z of tomo_dimensions
 
   # VRAM per GPU, in GB - the single setting that adapts MissAlignment to
   # the machine. Two profiles:
