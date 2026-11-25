@@ -26,11 +26,18 @@ old ones. Likewise, an automatically chosen training set is re-picked from the
 fresh RESOLVE ranking; mdocs you placed in `mdocs.train` yourself are never
 touched, forced or not.
 
+After stopping a run yourself (Ctrl-C, `kill`), check `nvidia-smi`:
+WarpTools' `WarpWorker` processes can outlive it and keep their GPUs busy.
+Kill any left over by their PID before starting again.
+
 ## Steps, in order
 
 1. **`create_config`** — writes `tomo_denoising_config.yaml`. At minimum set
    `paths.input_frames`, `paths.processing_directory`, and the three
    `mdocs.*` directories (`preprocessing`, `train`, `predict`).
+   The pipeline refuses to start if the processing directory is the frames
+   directory, or if `mdocs.train` is the same folder as
+   `mdocs.preprocessing`.
    The file records the version it was written for (`config_version`), and
    every step refuses to run with a config from a different version. After a
    software update, write a fresh template (`create_config -o new.yaml`),
@@ -38,7 +45,9 @@ touched, forced or not.
    error lists which keys differ.
 
 2. **`motion_correct`** — WarpTools `create_settings` + `fs_motion_and_ctf`:
-   motion correction and CTF estimation on the raw frames.
+   motion correction and CTF estimation on the raw frames. Counts as finished
+   only once it has completed successfully (`logs/.state/motion_correct.complete`)
+   - after a crash, a restart runs it again instead of skipping it.
    → `warp_frameseries/`
 
 3. **`align_tiltseries`** — imports the mdocs (`ts_import`), builds a stack
@@ -46,6 +55,30 @@ touched, forced or not.
    external AreTomo iterations (`aretomo.tilt_axis_iterations`), then aligns
    every tilt series natively with that axis fixed (`ts_aretomo3`).
    → `warp_tiltseries/<tomo>.xml`, `tilt_axis_refinement.txt`
+
+   **Alternative: IMOD patch tracking** *(experimental)* — with
+   `aligner: "imod"`, the final alignment is WarpTools' `ts_etomo_patches`
+   instead of `ts_aretomo3`. IMOD only refines a starting axis, and the
+   mdoc's is not trusted, so the starting axis is the AreTomo search's result
+   as above — or `imod.initial_tilt_axis`, and then AreTomo is not run at all.
+   `imod.tilt_axis_iterations` rounds (default 1) of
+   `ts_etomo_patches --do_axis_search` on a random subset refine it (each in
+   its own `warp_tiltseries/tiltaxis_search_imod/round_<n>/`, never touching
+   the project's XMLs), stopping early once a round moves it by less than
+   0.1°. Every tilt series is then aligned with that axis fixed. Both axes
+   are in `tilt_axis_refinement.txt`. Changing `aligner` re-aligns on the
+   next run. IMOD is found through `executables.imod` (its install folder),
+   `conda_env_imod`, or the `PATH`.
+
+   **Optional: leveling** *(experimental, off by default)* — with
+   `autolevel.enabled: true`, WarpTools' `ts_autolevel` runs after the final
+   alignment and stores how each sample slab is tilted (`LevelAngleX/Y` in
+   its XML); every later reconstruction is rotated so the slab lies flat,
+   which lets a thinner volume hold it. It can hurt IsoNet2's missing-wedge
+   correction: `LevelAngleY` is added to the tilt range IsoNet2 gets (and
+   called out in the log), but `LevelAngleX` tilts the wedge in a way IsoNet2
+   cannot model. A `ts_autolevel` failure stops the run. Changing the
+   setting re-aligns on the next run.
 
    Before anything is imported, each mdoc is checked for signs of a flawed
    acquisition: too few tilts, a narrow angular range, or a gap
@@ -55,8 +88,16 @@ touched, forced or not.
    AreTomo3 fails to align are excluded the same way, so the run continues
    with the rest. All exclusions and their reasons are listed in
    `excluded_tiltseries.json`, in the step report and at the end of
-   `run_pipe`. The pipeline never deletes files: if files from an earlier run
-   are in the way, it stops and lists them for you to remove.
+   `run_pipe` (IMOD failures the same way). The pipeline never deletes files: if files from an earlier run
+   are in the way, it stops and lists them for you to remove - together with
+   the commands that move the series' mdocs out of every mdoc folder into
+   `removed_mdocs/`, if you want to drop the series for good.
+
+   After `ts_aretomo3` / `ts_etomo_patches` (and again at the start of
+   `reconstruct_tomograms`),
+   every XML's tilt angles are checked: non-finite values, values beyond
+   ±90° or all-identical angles stop the run with the affected series named,
+   instead of a misleading crash in `ts_defocus_hand`.
 
 4. **`reconstruct_tomograms`** — defocus handedness check
    (`ts_defocus_hand`), CTF refinement (`ts_ctf`), then reconstructs the
@@ -113,7 +154,18 @@ touched, forced or not.
    (`warp_tiltseries/inverted_half-maps_IsoNet2/`, or
    `…_uncorrected_IsoNet2/` without MissAlignment), made the first time
    IsoNet needs them. The final tomograms therefore have dark features.
+   Each tomogram's tilt range is taken from its WarpTools XML and converted
+   to IsoNet2's sign convention (the XML's angles have the opposite sign:
+   XML −52/46 → IsoNet −46/52), and its defocus (used only with
+   `isonet.ctf_mode: "network"`) from the XML's per-tilt CTF fit.
    → `isonet/corrected_tomos_final/` (the final deliverable)
+
+   **Alternative: `train_cryocare`** / **`predict_cryocare`** — with
+   `denoiser: "cryocare"`, `run_pipe` uses CryoCARE instead of IsoNet (never
+   both). It gets the same contrast-inverted half maps and the same
+   `mdocs.train` / `mdocs.predict` sets, and denoises only (no missing-wedge
+   correction).
+   → `cryocare/denoised/` (the final deliverable), `results_cryocare.pdf`
 
 ## Run everything at once
 

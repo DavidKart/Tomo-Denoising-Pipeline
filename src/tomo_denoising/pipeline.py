@@ -1,7 +1,10 @@
 """``tomo_denoising run_pipe``: the whole workflow from one configuration.
 
     motion_correct -> align_tiltseries -> reconstruct_tomograms
-        -> [run_missalignment] -> quality_check -> train_isonet -> predict_isonet
+        -> [run_missalignment] -> quality_check -> train_<denoiser> -> predict_<denoiser>
+
+``<denoiser>`` is ``isonet`` (default) or ``cryocare`` - the config's
+``denoiser`` setting; run_pipe never runs both.
 
 MissAlignment runs by default - pass ``--skip-missalignment`` to disable it.
 ``reconstruct_tomograms`` always reconstructs the full, non-split tomogram -
@@ -62,12 +65,13 @@ def _training_set_ready(config):
 def run_pipe(config, skip_quality=False, skip_missalignment=False,
             produce_intermediates=False, force=None, dry_run=False):
     """Run every step in order. Returns a process exit code."""
-    from . import isonet, missalign, resolve, warptools
+    from . import cryocare, isonet, missalign, resolve, warptools
 
     force = config.overwrite if force is None else force
 
-    banner("run_pipe: IsoNet denoising%s"
-           % ("" if not skip_quality else ", quality check skipped"))
+    banner("run_pipe: %s denoising%s"
+           % ("CryoCARE" if config.denoiser == "cryocare" else "IsoNet",
+              "" if not skip_quality else ", quality check skipped"))
     info("processing directory: %s" % config.processing_dir)
     info("resume mode: %s"
          % ("off - everything will be redone" if force
@@ -147,14 +151,17 @@ def run_pipe(config, skip_quality=False, skip_missalignment=False,
         if code != 0:
             warn("quality_check reported problems - continuing anyway.")
 
-    # --- 4. IsoNet training and prediction ----------------------------------
-    banner("run_pipe 6/6  train_isonet + predict_isonet")
-    code = isonet.train(config, force=force, dry_run=dry_run)
+    # --- 4. denoiser training and prediction --------------------------------
+    # Exactly ONE denoiser per run, chosen by the 'denoiser' setting.
+    denoiser = cryocare if config.denoiser == "cryocare" else isonet
+    banner("run_pipe 6/6  train_%s + predict_%s"
+           % (config.denoiser, config.denoiser))
+    code = denoiser.train(config, force=force, dry_run=dry_run)
     if code != 0:
         warn("training failed - stopping.")
         return code
 
-    code = isonet.predict(config, force=force, dry_run=dry_run)
+    code = denoiser.predict(config, force=force, dry_run=dry_run)
     if code != 0:
         warn("prediction failed.")
         return code

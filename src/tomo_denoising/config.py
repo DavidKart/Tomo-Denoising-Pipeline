@@ -18,7 +18,26 @@ DEFAULT_CONFIG_NAME = "tomo_denoising_config.yaml"
 #: Executables that may live in a conda/mamba environment of their own, run
 #: via ``conda run -n <env> ...`` (see :meth:`Config.command`). The config key
 #: for each is ``conda_env_<name>`` at the top level, next to ``paths``.
-CONDA_WRAPPABLE = ("warptools", "missalign", "aretomo", "isonet", "resolve")
+CONDA_WRAPPABLE = ("warptools", "missalign", "aretomo", "isonet", "resolve",
+                   "cryocare", "imod")
+
+#: Executables that share ONE conda environment setting with others: the
+#: three CryoCARE scripts all live in the same environment, and IMOD's
+#: ``header`` in IMOD's.
+_CONDA_ENV_OF = {
+    "cryocare_extract": "cryocare",
+    "cryocare_train": "cryocare",
+    "cryocare_predict": "cryocare",
+    "header": "imod",
+}
+
+#: The denoisers run_pipe can use - exactly one per run (see "denoiser").
+DENOISERS = ("isonet", "cryocare")
+
+#: The programs that can do the final tilt-series alignment - exactly one
+#: per run (see "aligner"): WarpTools ts_aretomo3, or ts_etomo_patches
+#: (IMOD patch tracking).
+ALIGNERS = ("aretomo", "imod")
 
 #: Fallback values merged under whatever the user supplies, so an incomplete
 #: config never raises a KeyError deep inside a processing step.
@@ -46,11 +65,19 @@ DEFAULTS = {
         # external tilt-axis-search calls and passed to WarpTools'
         # ts_aretomo3 --exe.
         "aretomo": "AreTomo3",
-        "header": "header",                # IMOD, pixel-size fallback only
+        # IMOD's install FOLDER (IMOD_DIR), not a program: its bin/ is put
+        # first on the PATH of ts_etomo_patches (which runs batchruntomo),
+        # and its bin/header is the pixel-size fallback. "" -> whatever IMOD
+        # is already on the PATH (or in conda_env_imod).
+        "imod": "",
         "isonet": "isonet.py",
         "resolve": "RESOLVE",
         "warptools": "WarpTools",
         "missalign": "miss-alignment",
+        # Only used with denoiser: "cryocare".
+        "cryocare_extract": "cryoCARE_extract_train_data.py",
+        "cryocare_train": "cryoCARE_train.py",
+        "cryocare_predict": "cryoCARE_predict.py",
         # Only used when one of the conda_env_* settings is set.
         "conda": "conda",
     },
@@ -61,8 +88,22 @@ DEFAULTS = {
     "conda_env_aretomo": "",
     "conda_env_isonet": "",
     "conda_env_resolve": "",
+    "conda_env_cryocare": "",
+    # IMOD is never run through "conda run" by ts_etomo_patches: the
+    # environment's bin/ (and its IMOD_DIR, if it sets one) is put on the
+    # PATH of the WarpTools call instead - see imod.imod_env.
+    "conda_env_imod": "",
     "overwrite": False,
     "gpus": [0, 1],
+    # VRAM per GPU, in GB. Shared by MissAlignment (>= 24: its own reference
+    # settings, lower: the low-memory profile - see
+    # missalign._memory_profile) and IsoNet (isonet.cube_size "auto": 128
+    # at >= 24, 96 otherwise).
+    "gpu_memory_gb": 12,
+    # Which program does the final tilt-series alignment - one of ALIGNERS.
+    "aligner": "aretomo",
+    # Which denoiser run_pipe trains and applies - one of DENOISERS.
+    "denoiser": "isonet",
     "acquisition": {
         "pixel_size": "read",
         "frame_extension": "tiff",         # tif/tiff/eer/mrc
@@ -130,13 +171,38 @@ DEFAULTS = {
         "tilt_axis_seed": 0,
         "extra_args": "",
     },
+    "imod": {
+        # Only used with aligner: "imod". "" -> the starting axis comes from
+        # the AreTomo tilt axis search (the aretomo section); a degrees
+        # value is used instead, and AreTomo is not run at all.
+        "initial_tilt_axis": "",
+        # ts_etomo_patches --do_axis_search rounds on a random subset, each
+        # starting from the previous result; 0 -> the starting axis is used
+        # as it is for the final alignment.
+        "tilt_axis_iterations": 1,
+        "tilt_axis_subset_size": 10,
+        "tilt_axis_seed": 0,
+        # ts_etomo_patches --patch_size, Angstrom, or "auto": the field of
+        # view's short side / 7, rounded to 100, at least 500 (see
+        # warptools.imod_patch_size).
+        "patch_size": "auto",
+    },
+    "autolevel": {
+        # EXPERIMENTAL. WarpTools ts_autolevel after the final alignment:
+        # levels the sample slab (LevelAngleX/Y in each XML) so it lies flat
+        # in the tomogram. Can hurt IsoNet2's missing-wedge correction (the
+        # wedge is tilted by the level angles). Changing it re-aligns.
+        "enabled": False,
+        # ts_autolevel --patch_size, Angstrom (WarpTools' default).
+        "patch_size": 500,
+    },
     "warptools": {
         "dont_invert": False,
         "min_intensity": 0.3,
         # Pixel size (A) for ts_stack / our own axis-search AreTomo calls /
-        # native ts_aretomo3. A coarser value than the final reconstruction,
-        # matching how alignment is normally done.
-        "align_angpix": 10.0,
+        # native ts_aretomo3. A multiple of the raw pixel size, so the
+        # binning is the same whatever the dataset's own pixel size.
+        "align_angpix": "4*pixel_size",
         # Final reconstruction pixel size (A), for ts_reconstruct.
         "recon_angpix": 9.0,
         "min_fov": 0,
@@ -169,15 +235,18 @@ DEFAULTS = {
     "isonet": {
         "denoise_epochs": 50,
         "refine_epochs": 100,
-        # "None" (the exact string IsoNet2's CLI expects - not "none", not
-        # a null/empty value): the half maps IsoNet trains on are already
-        # CTF-corrected by WarpTools (ts_defocus_hand -> ts_ctf ->
-        # ts_reconstruct, run before IsoNet ever sees them). IsoNet2's other
-        # modes ("network"/"wiener"/"phase_only") each assume RAW,
-        # un-CTF-corrected weighted-back-projection input and apply their
-        # own CTF-shaped correction on top - using one of them here would
-        # double-correct already-corrected data.
-        "ctf_mode": "None",
+        # "auto": 128 when gpu_memory_gb >= 24, else 96. Or a number.
+        "cube_size": "auto",
+        # "network" (default) or "None" (the exact string IsoNet2's CLI
+        # expects - not "none", not a null/empty value). WarpTools'
+        # ts_reconstruct only phase-flips the CTF; its amplitude
+        # modulation is still in the half maps, which "network" models
+        # using each tomogram's defocus (rlnDefocus, from the XML's
+        # GridCTF) - see isonet.tomogram_defocus.
+        "ctf_mode": "network",
+        # --isCTFflipped for denoise/refine/predict, only passed when
+        # ctf_mode is not "None". WarpTools' half maps are phase-flipped.
+        "is_ctf_flipped": True,
         "density_percentage": 50,
         "std_percentage": 80,
         "mw_weight": 200,
@@ -197,11 +266,6 @@ DEFAULTS = {
             "xy": "",
             "z": "",
         },
-        # VRAM per GPU, in GB. >= 24 uses MissAlignment's own reference
-        # settings unchanged; anything lower selects the low-memory profile
-        # (see missalign._memory_profile), which is what makes the step run
-        # at all on a 12 GB card.
-        "gpu_memory_gb": 12,
         # null = taken from the gpu_memory_gb profile / config.gpus. Set any
         # of these explicitly to override it.
         "batch_size": None,
@@ -210,10 +274,18 @@ DEFAULTS = {
         "training_devices": None,
         "reconstruction_devices": None,
         "dataloaders_per_trainer": None,
-        "prepare_stacks_gb": 10.0,
+        # miss-alignment --prepare-stacks: a PIXEL SIZE in Angstrom (the
+        # tilt stacks MissAlignment builds for itself), not disk space.
+        "stack_pixel_size": 10.0,
         # NCCL transport control for multi-GPU training - see
         # missalign.resolve_nccl_env. "" leaves NCCL's own defaults alone.
         "nccl_p2p": "PIX",
+    },
+    "cryocare": {
+        "epochs": 100,
+        "patch_shape": [72, 72, 72],
+        "num_slices": 1800,
+        "n_tiles": [8, 8, 8],
     },
 }
 
@@ -227,6 +299,11 @@ _LEGACY_KEYS = {
     "tilt_split": "quality_check.enable_tilt_split / "
                   "quality_check.tilt_split_target_pixel_size",
     "missalign.conda_env": "conda_env_missalign",
+    "missalign.gpu_memory_gb": "gpu_memory_gb (top level, next to gpus)",
+    "missalign.prepare_stacks_gb": "missalign.stack_pixel_size (it always "
+                                   "was a pixel size in Angstrom, not GB)",
+    "executables.header": "executables.imod (IMOD's install folder - "
+                          "header is taken from its bin/)",
 }
 
 
@@ -441,6 +518,34 @@ class Config(object):
                      "config to silence this."
                      % (self.source, text, converted["xy"], converted["z"]))
 
+        raw_missalign = raw.get("missalign") or {}
+        if "gpu_memory_gb" in raw_missalign and "gpu_memory_gb" not in raw:
+            self.data["gpu_memory_gb"] = raw_missalign["gpu_memory_gb"]
+            warn("%s still sets missalign.gpu_memory_gb; it is now the "
+                 "top-level 'gpu_memory_gb' (shared with IsoNet). Using it for "
+                 "now - move it there to silence this." % self.source)
+        if ("prepare_stacks_gb" in raw_missalign
+                and "stack_pixel_size" not in raw_missalign):
+            self.data["missalign"]["stack_pixel_size"] = raw_missalign["prepare_stacks_gb"]
+            warn("%s still sets missalign.prepare_stacks_gb; it is now "
+                 "missalign.stack_pixel_size - it always was the pixel size "
+                 "(Angstrom) of MissAlignment's own tilt stacks, not GB. "
+                 "Using it for now - rename it to silence this." % self.source)
+        self.data["missalign"].pop("gpu_memory_gb", None)
+        self.data["missalign"].pop("prepare_stacks_gb", None)
+
+        # executables.header is now derived from executables.imod. A header
+        # set to anything but the bare default is still honoured.
+        legacy_header = str((raw.get("executables") or {}).get("header") or "").strip()
+        self._legacy_header = ""
+        if legacy_header and legacy_header != "header":
+            self._legacy_header = legacy_header
+            warn("%s still sets executables.header; IMOD is now configured "
+                 "as a whole with executables.imod (its install folder) or "
+                 "conda_env_imod. Using %r for now - remove it to silence "
+                 "this." % (self.source, legacy_header))
+        self.data["executables"].pop("header", None)
+
         legacy_env = str((raw.get("missalign") or {}).get("conda_env") or "").strip()
         if legacy_env and not str(raw.get("conda_env_missalign") or "").strip():
             self.data["conda_env_missalign"] = legacy_env
@@ -464,12 +569,83 @@ class Config(object):
             )
         self.data["acquisition"]["frame_extension"] = ext
 
-        mode = str(self.data["tiltseries_filter"]["mode"]).strip().lower()
+        self._check_distinct_folders()
+
+        denoiser = str(self.data.get("denoiser") or "").strip().lower()
+        if denoiser not in DENOISERS:
+            raise ConfigError(
+                "denoiser must be one of %s, got %r"
+                % ("/".join(DENOISERS), self.data.get("denoiser")))
+        self.data["denoiser"] = denoiser
+
+        aligner = str(self.data.get("aligner") or "").strip().lower()
+        if aligner not in ALIGNERS:
+            raise ConfigError(
+                "aligner must be one of %s, got %r"
+                % ("/".join(ALIGNERS), self.data.get("aligner")))
+        self.data["aligner"] = aligner
+
+        patch = self.data["imod"].get("patch_size")
+        if str(patch).strip().lower() == "auto":
+            self.data["imod"]["patch_size"] = "auto"
+        else:
+            try:
+                ok = float(patch) > 0
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                raise ConfigError(
+                    "imod.patch_size must be \"auto\" or a positive number of "
+                    "Angstrom, got %r" % patch)
+
+        if not isinstance(self.data["autolevel"].get("enabled"), bool):
+            raise ConfigError(
+                "autolevel.enabled must be true or false, got %r"
+                % self.data["autolevel"].get("enabled"))
+
+        mode =str(self.data["tiltseries_filter"]["mode"]).strip().lower()
         if mode not in ("exclude", "stop", "off"):
             raise ConfigError(
                 "tiltseries_filter.mode must be one of exclude/stop/off, "
                 "got %r" % self.data["tiltseries_filter"]["mode"]
             )
+
+    def _check_distinct_folders(self):
+        """Refuse folder settings that would overwrite or mix data:
+
+        - processing_directory == input_frames: WarpTools treats every
+          *.mrc in the frames folder as a movie, and results would be
+          written next to the raw data that must only ever be read;
+        - mdocs.train == mdocs.preprocessing: every tilt series would be
+          trained on, and the automatic training-set choice (which fills
+          mdocs.train with links) would write into the user's own mdocs.
+
+        Only settings that are actually filled in are compared.
+        """
+        def folder(raw):
+            raw = str(raw or "").strip()
+            if not raw or raw.startswith("/path/to"):
+                return None
+            return os.path.normcase(os.path.realpath(os.path.abspath(raw)))
+
+        processing = folder(self.data["paths"].get("processing_directory"))
+        frames = folder(self.data["paths"].get("input_frames"))
+        if processing and frames and processing == frames:
+            raise ConfigError(
+                "paths.processing_directory and paths.input_frames are the "
+                "same folder (%s) in %s. The frames folder is only ever read; "
+                "all results must go to a separate processing directory."
+                % (self.data["paths"]["processing_directory"], self.source))
+
+        train = folder(self.data["mdocs"].get("train"))
+        preprocessing = folder(self.data["mdocs"].get("preprocessing"))
+        if train and preprocessing and train == preprocessing:
+            raise ConfigError(
+                "mdocs.train and mdocs.preprocessing are the same folder (%s) "
+                "in %s. mdocs.train must be its own folder: a subset of the "
+                "tilt series to train on, chosen by you or filled in "
+                "automatically by the quality check."
+                % (self.data["mdocs"]["train"], self.source))
 
     # ------------------------------------------------------------- accessors
     def __getitem__(self, key):
@@ -530,7 +706,26 @@ class Config(object):
         return [int(g) for g in gpus]
 
     def exe(self, name):
+        if name == "header":
+            return self._header_exe()
         return self.data["executables"][name]
+
+    @property
+    def imod_dir(self):
+        """IMOD's install folder (``executables.imod``), or "" for whatever
+        IMOD the PATH / conda_env_imod provides."""
+        return str(self.data["executables"].get("imod") or "").strip()
+
+    def _header_exe(self):
+        """IMOD's ``header``: an old-style executables.header if one is set
+        (see _migrate_legacy), else ``<imod>/bin/header``, else ``header``
+        on the PATH (or inside conda_env_imod - see :meth:`command`)."""
+        legacy = getattr(self, "_legacy_header", "")
+        if legacy:
+            return legacy
+        if self.imod_dir:
+            return os.path.join(self.imod_dir, "bin", "header")
+        return "header"
 
     # ------------------------------------------------------- conda wrapping
     def conda_env(self, name):
@@ -541,6 +736,7 @@ class Config(object):
         inside each program's own section because it is the same question for
         every one of them.
         """
+        name = _CONDA_ENV_OF.get(name, name)
         if name not in CONDA_WRAPPABLE:
             return ""
         return str(self.data.get("conda_env_%s" % name) or "").strip()
@@ -670,6 +866,33 @@ class Config(object):
     def isonet_dir(self):
         return self.sub("isonet")
 
+    @property
+    def cryocare_dir(self):
+        return self.sub("cryocare")
+
+    @property
+    def removed_mdocs_dir(self):
+        """Where error messages suggest the USER moves the mdocs of broken
+        tilt series - never written by the pipeline itself."""
+        return self.sub("removed_mdocs")
+
+    @property
+    def denoiser(self):
+        return self.data["denoiser"]
+
+    @property
+    def aligner(self):
+        return self.data["aligner"]
+
+    @property
+    def autolevel(self):
+        """Whether ts_autolevel levels the samples after the alignment."""
+        return self.data["autolevel"]["enabled"]
+
+    @property
+    def gpu_memory_gb(self):
+        return float(self.data.get("gpu_memory_gb") or 12)
+
     # ------------------------------------------------------- WarpTools project
     @property
     def warp_frameseries_settings_path(self):
@@ -712,6 +935,14 @@ class Config(object):
         never be mistaken by anything for real project state.
         """
         return self.sub("warp_tiltseries", "tiltaxis_search")
+
+    @property
+    def imod_axis_search_dir(self):
+        """Scratch home for the IMOD tilt axis search rounds (aligner:
+        "imod"): one ``round_<n>/`` per round, each a ts_etomo_patches
+        ``--output_processing`` - so warp_tiltseries/<tomo>.xml itself is
+        only ever written by the final alignment."""
+        return self.sub("warp_tiltseries", "tiltaxis_search_imod")
 
     @property
     def uncorrected_reconstruction_dir(self):

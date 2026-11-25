@@ -50,6 +50,10 @@ DENOISER_OUTPUTS = {
         os.path.join("isonet", "corrected_tomos_final"),
         os.path.join("isonet", "corrected_tomos"),
     ],
+    # cryocare.DENOISED_DIR - the only CryoCARE output holding tomograms.
+    "cryocare": [
+        os.path.join("cryocare", "denoised"),
+    ],
 }
 
 TOMOGRAM_EXTENSIONS = (".mrc", ".rec", ".map")

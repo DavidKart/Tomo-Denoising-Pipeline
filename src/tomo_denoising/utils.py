@@ -80,11 +80,43 @@ def _replace_stale_link(destination, source):
     return True
 
 
-def link_file(source, destination, force=False):
+def _is_within(path, root):
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:          # different drives (Windows)
+        return False
+
+
+def symlink_target(source, destination, within=None):
+    """What the symlink at *destination* should contain to reach *source*.
+
+    RELATIVE when both lie inside *within* (the processing directory): such
+    links keep working when the whole processing directory is moved or
+    mounted elsewhere. ABSOLUTE otherwise - a link to something outside
+    (e.g. the user's own mdoc folders) would break on exactly that move if
+    it were relative. Computed on the real paths (symlinks in the folders
+    themselves resolved), since that is what the kernel resolves a relative
+    link against.
+    """
+    source = os.path.abspath(source)
+    if within is None:
+        return source
+    root = os.path.realpath(within)
+    real_source = os.path.realpath(source)
+    real_dest_dir = os.path.realpath(os.path.dirname(os.path.abspath(destination)))
+    if not (_is_within(real_source, root) and _is_within(real_dest_dir, root)):
+        return source
+    return os.path.relpath(real_source, real_dest_dir)
+
+
+def link_file(source, destination, force=False, within=None):
     """Make *source* reachable at *destination* without moving or copying.
 
     Tries a symlink first, then a hard link, and only copies as a last resort
-    (e.g. on filesystems or platforms where neither is available).
+    (e.g. on filesystems or platforms where neither is available). The
+    symlink is relative when *source* and *destination* are both inside
+    *within* (callers pass the processing directory) - see
+    :func:`symlink_target`.
 
     *force* (the step's own ``--force``/``overwrite``) re-points an existing
     *destination* at *source* instead of keeping it - see
@@ -99,7 +131,7 @@ def link_file(source, destination, force=False):
             return destination
     ensure_dir(os.path.dirname(destination))
     try:
-        os.symlink(source, destination)
+        os.symlink(symlink_target(source, destination, within), destination)
         return destination
     except (OSError, NotImplementedError, AttributeError):
         pass
@@ -205,8 +237,12 @@ def _watch_for_quiet(state, stop, label, pid, log_file, quiet_after, lock, handl
             "anything is wrong - these steps are often legitimately quiet for "
             "long stretches, and the run is still going. It is worth a look if "
             "the gap keeps growing: the process is PID %d%s. "
-            "'nvidia-smi' shows whether the GPUs are still busy, and "
-            "'py-spy dump --pid %d' shows what it is currently doing."
+            "'nvidia-smi' shows whether the GPUs are still busy; "
+            "'ps -o pid,stat,etime,time,args --forest -g $(ps -o sid= -p %d)' "
+            "shows which of its child processes is running (TIME growing as "
+            "fast as ELAPSED: busy - or stuck in a loop), and "
+            "'strace -p <that pid>' what it is doing. For a Python program, "
+            "'py-spy dump --pid <pid>' shows where it is."
             % (label, human_duration(silent), pid,
                ", its log is %s" % log_file if log_file else "", pid))
         info(message)
@@ -224,6 +260,18 @@ def _watch_for_quiet(state, stop, label, pid, log_file, quiet_after, lock, handl
 
 class CommandError(Exception):
     """A external program returned a non-zero exit status."""
+
+
+def _printable_env_value(key, value):
+    """*value* for the printed command line - a PATH that only extends this
+    process' own PATH (e.g. IMOD's bin/ put first) is shown as
+    ``<added>:$PATH`` instead of in full."""
+    value = str(value)
+    current = os.environ.get(key, "")
+    if key == "PATH" and current and value.endswith(os.pathsep + current):
+        added = value[:-len(os.pathsep + current)]
+        return shlex.quote(added) + os.pathsep + "$PATH"
+    return shlex.quote(value)
 
 
 def run(command, cwd=None, log_file=None, check=True, dry_run=False, env=None,
@@ -259,7 +307,7 @@ def run(command, cwd=None, log_file=None, check=True, dry_run=False, env=None,
 
     printable = " ".join(shlex.quote(part) for part in argv)
     if env:
-        printable = " ".join("%s=%s" % (k, shlex.quote(str(v)))
+        printable = " ".join("%s=%s" % (k, _printable_env_value(k, v))
                              for k, v in env.items()) + " " + printable
     where = " (in %s)" % cwd if cwd else ""
     info("$ %s%s" % (printable, where))
@@ -293,6 +341,12 @@ def run(command, cwd=None, log_file=None, check=True, dry_run=False, env=None,
             argv,
             cwd=cwd,
             env=full_env,
+            # A readable, empty input - never the pipeline's own, which under
+            # nohup is an UNREADABLE /dev/null: IMOD's processchunks (started
+            # by ts_etomo_patches) polls its input every second, every read
+            # fails at once, and it spins at 100% CPU without ever starting
+            # its job. No tool here needs keyboard input; Ctrl-C still works.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
@@ -372,6 +426,7 @@ def capture(command, cwd=None, env=None):
             [str(part) for part in argv],
             cwd=cwd,
             env=full_env,
+            stdin=subprocess.DEVNULL,  # see run()
             stderr=subprocess.DEVNULL,
             universal_newlines=True,
         )
@@ -449,6 +504,9 @@ GPU_ID_CONVENTION = {
     "resolve": "logical",
     "warptools": "logical",
     "isonet": "real",
+    # CryoCARE's json "gpu_id" indexes tf.config.list_physical_devices('GPU'),
+    # i.e. the devices CUDA_VISIBLE_DEVICES leaves visible.
+    "cryocare": "logical",
 }
 
 

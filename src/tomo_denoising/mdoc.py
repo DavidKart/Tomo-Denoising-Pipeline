@@ -198,10 +198,9 @@ def parse_mdoc(mdoc_path):
         if missing:
             problems.append("[ZValue = %s] has no %s - tilt ignored"
                             % (tilt.zvalue, " or ".join(missing)))
-    zvalues = [t.zvalue for t in tilts]
-    if tilts and zvalues != list(range(len(tilts))):
-        problems.append("ZValues are not 0..%d in order (%s)"
-                        % (len(tilts) - 1, _abbreviate(zvalues)))
+    # No check of the block ORDER (ZValues, DateTime): WarpTools orders the
+    # tilts by their DateTime itself, so the order of the blocks in the
+    # file does not matter.
     problems += _datetime_problems(tilts)
     for problem in problems:
         warn("%s: %s" % (name, problem))
@@ -248,10 +247,11 @@ def _datetime_problems(tilts):
     """Warnings (never errors) about the blocks' DateTime entries.
 
     WarpTools' ts_import has failed on mdocs with tilts lacking a DateTime,
-    and acquisition order matters for dose weighting - but that is a
-    property of today's WarpTools, not of the data, so this only ever WARNS:
-    a future version may not care, and a hard stop here would then block
-    perfectly good data.
+    and it takes the acquisition (dose) order from the DateTime - but that
+    is a property of today's WarpTools, not of the data, so this only ever
+    WARNS: a future version may not care, and a hard stop here would then
+    block perfectly good data. Blocks out of time order are fine (WarpTools
+    sorts by DateTime) and are not reported.
     """
     problems = []
     missing = [t.zvalue for t in tilts if t.datetime_raw is None]
@@ -265,13 +265,6 @@ def _datetime_problems(tilts):
         problems.append("DateTime not in SerialEM's usual format in %d "
                         "block(s) (ZValue %s) - continuing anyway"
                         % (len(unreadable), _abbreviate(unreadable)))
-    dated = [t for t in tilts if t.datetime is not None]
-    backwards = [later.zvalue for earlier, later in zip(dated, dated[1:])
-                 if later.datetime < earlier.datetime]
-    if backwards:
-        problems.append("DateTime goes backwards at ZValue %s - acquisition "
-                        "(dose) order may not match the block order; "
-                        "continuing anyway" % _abbreviate(backwards))
     return problems
 
 
@@ -368,6 +361,54 @@ def find_mdocs(directory):
     return sorted(set(found))
 
 
+#: The mdoc folders of the config, in the order they are listed.
+MDOC_SETS = ("preprocessing", "train", "predict")
+
+
+def mdoc_paths_for(config, tomo_names):
+    """``[(which, path), ...]``: every mdoc of *tomo_names* in ANY of the
+    config's mdoc folders (preprocessing, train, predict). A folder listed
+    under two names (predict is often the preprocessing folder) is listed
+    once. Links count too - mdocs.train holds links the quality check
+    made."""
+    wanted = set(tomo_names)
+    seen_dirs = set()
+    found = []
+    for which in MDOC_SETS:
+        try:
+            directory = config.mdoc_dir(which)
+        except SystemExit:          # that mdoc folder is not configured
+            continue
+        key = os.path.normcase(os.path.abspath(directory))
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        for path in find_mdocs(directory):
+            if tomo_name_from_mdoc(path) in wanted:
+                found.append((which, path))
+    return found
+
+
+def mdoc_move_commands(config, tomo_names):
+    """Shell lines that move the mdocs of *tomo_names* out of every mdoc
+    folder into ``<processing>/removed_mdocs/<folder>/`` - for the "remove
+    these files" messages, so a broken tilt series is not picked up again
+    (e.g. denoised by predict). One subfolder per mdoc folder, since the
+    same file name usually sits in several. Moved, not deleted: mdocs are
+    raw metadata. The pipeline only ever PRINTS these."""
+    import shlex
+
+    lines = []
+    made = set()
+    for which, path in mdoc_paths_for(config, tomo_names):
+        target = os.path.join(config.removed_mdocs_dir, which)
+        if target not in made:
+            lines.append("    mkdir -p %s" % shlex.quote(target))
+            made.add(target)
+        lines.append("    mv %s %s/" % (shlex.quote(path), shlex.quote(target)))
+    return lines
+
+
 def collect_tilt_series(directory, label):
     """Parse every mdoc in *directory*; returns a list of :class:`TiltSeries`."""
     mdocs = find_mdocs(directory)
@@ -416,7 +457,11 @@ def resolve_pixel_size(config, series, first_frame_path=None):
         return float(series.pixel_spacing)
 
     header = config.exe("header")
-    if not executable_available(header):
+    # Inside conda_env_imod, header need not be on this process' PATH -
+    # conda itself is what has to be reachable then.
+    reachable = (executable_available(config.exe("conda"))
+                 if config.conda_env("header") else executable_available(header))
+    if not reachable:
         raise SystemExit(HEADER_MISSING_MESSAGE % {
             "series": series.name,
             "mdoc": os.path.basename(series.mdoc_path),
@@ -427,7 +472,7 @@ def resolve_pixel_size(config, series, first_frame_path=None):
     if first_frame_path and os.path.exists(first_frame_path):
         info("pixel size not in the mdoc - reading it with IMOD: %s %s"
              % (header, os.path.basename(first_frame_path)))
-        output = capture([header, first_frame_path],
+        output = capture(config.command("header", first_frame_path),
                          env=gpu_env(config.gpus))
         if output:
             for line in output.splitlines():

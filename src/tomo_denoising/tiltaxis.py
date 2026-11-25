@@ -298,9 +298,13 @@ def write_report(config, rows, final_angle, note=""):
     else:
         lines.append("CONVERGED TILT AXIS: %+.4f deg" % final_angle)
         lines.append("")
-        lines.append("Every tilt series was then aligned once by native WarpTools")
-        lines.append("  ts_aretomo3 --axis %.4f --axis_iter 0   (angle fixed, no search)"
-                     % final_angle)
+        if getattr(config, "aligner", "aretomo") == "imod":
+            lines.append("Handed to IMOD (ts_etomo_patches) as its starting axis -")
+            lines.append("see the IMOD section below.")
+        else:
+            lines.append("Every tilt series was then aligned once by native WarpTools")
+            lines.append("  ts_aretomo3 --axis %.4f --axis_iter 0   (angle fixed, no search)"
+                         % final_angle)
     if note:
         lines.append("")
         lines.append(note)
@@ -319,7 +323,9 @@ def read_converged_angle(config):
         return None
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            match = re.search(r"CONVERGED TILT AXIS:\s*([+-]?\d+\.?\d*)", line)
+            # Anchored: the IMOD section's "IMOD CONVERGED TILT AXIS" line
+            # (imod.py) is a different result and must not match here.
+            match = re.match(r"\s*CONVERGED TILT AXIS:\s*([+-]?\d+\.?\d*)", line)
             if match:
                 return float(match.group(1))
     return None

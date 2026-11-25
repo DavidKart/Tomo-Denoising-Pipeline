@@ -16,7 +16,8 @@ Steps, in the order they are normally run:
   create_config         write a commented tomo_denoising_config.yaml to edit
   motion_correct        WarpTools create_settings + fs_motion_and_ctf
   align_tiltseries      ts_import, ts_stack, tilt axis search, native
-                        ts_aretomo3 (axis fixed, no search)
+                        ts_aretomo3 (axis fixed, no search) - or, with
+                        aligner "imod", ts_etomo_patches (IMOD patch tracking)
   reconstruct_tomograms ts_defocus_hand, ts_ctf, ts_reconstruct (full
                         tomogram, frame-split half maps, and tilt-split half
                         maps if quality_check.enable_tilt_split is set)
@@ -24,9 +25,12 @@ Steps, in the order they are normally run:
                         --skip-missalignment in run_pipe disables it)
   quality_check         RESOLVE resolution estimate, training set, results figure
   train_isonet          prepare_star, denoise, mask, refine
-  predict_isonet         apply the refined IsoNet network
+  predict_isonet        apply the refined IsoNet network
+  train_cryocare        CryoCARE training (alternative denoiser)
+  predict_cryocare      apply the trained CryoCARE model
 
-  run_pipe               all of the above in one go
+  run_pipe              all of the above in one go - with ONE denoiser,
+                        the config's 'denoiser' (IsoNet by default)
 
 Every step writes a report to <processing_directory>/logs/ and, unless
 overwrite is true, resumes rather than repeats finished work.
@@ -72,7 +76,8 @@ def build_parser():
 
     _add_common(sub.add_parser(
         "align_tiltseries",
-        help="ts_import, ts_stack, tilt axis search, native ts_aretomo3"))
+        help="ts_import, ts_stack, tilt axis search, native ts_aretomo3 "
+             "(or ts_etomo_patches with aligner: imod)"))
 
     _add_common(sub.add_parser(
         "reconstruct_tomograms",
@@ -93,6 +98,15 @@ def build_parser():
     _add_common(sub.add_parser(
         "predict_isonet",
         help="denoise with the refined IsoNet network"))
+
+    _add_common(sub.add_parser(
+        "train_cryocare",
+        help="CryoCARE: extract training data and train (alternative "
+             "denoiser, denoiser: \"cryocare\")"))
+
+    _add_common(sub.add_parser(
+        "predict_cryocare",
+        help="denoise with the trained CryoCARE model"))
 
     pipe = sub.add_parser("run_pipe",
                           help="run the whole pipeline from the configuration")
@@ -183,6 +197,14 @@ def main(argv=None):
         if args.command == "predict_isonet":
             from . import isonet
             return isonet.predict(config, force=force, dry_run=args.dry_run)
+
+        if args.command == "train_cryocare":
+            from . import cryocare
+            return cryocare.train(config, force=force, dry_run=args.dry_run)
+
+        if args.command == "predict_cryocare":
+            from . import cryocare
+            return cryocare.predict(config, force=force, dry_run=args.dry_run)
 
         if args.command == "run_pipe":
             from . import pipeline

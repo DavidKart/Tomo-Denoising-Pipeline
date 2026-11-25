@@ -7,6 +7,11 @@ Everything up to reconstruction runs through WarpTools natively:
                            ts_stack -> OUR OWN tilt axis search (tiltaxis.py,
                            unchanged) -> ts_import --override_axis ->
                            native ts_aretomo3, axis fixed, no search
+                           (aligner: "imod": the AreTomo search, or
+                           imod.initial_tilt_axis, only gives the starting
+                           axis; ts_etomo_patches search rounds refine it,
+                           and the final alignment is ts_etomo_patches with
+                           that axis fixed - see imod.py)
   3. reconstruct_tomograms ts_defocus_hand -> ts_ctf -> ts_reconstruct
                            (frame-split and, when quality_check.
                            enable_tilt_split is set, tilt-split)
@@ -67,10 +72,11 @@ import shlex
 import time
 import uuid
 
-from . import tiltaxis, tiltfilter
+from . import imod, tiltaxis, tiltfilter
 from .mdoc import (
-    collect_tilt_series, find_mdocs, match_tomo_name, pixel_size_is_read,
-    resolve_angpix, resolve_pixel_size, tomo_name_from_mdoc, write_filtered_mdoc,
+    collect_tilt_series, find_mdocs, match_tomo_name, mdoc_move_commands,
+    pixel_size_is_read, resolve_angpix, resolve_pixel_size, tomo_name_from_mdoc,
+    write_filtered_mdoc,
 )
 from .steplog import StepLog
 from .utils import (
@@ -118,6 +124,8 @@ _DEVICE_LIST_COMMANDS = frozenset((
     "fs_export_micrographs", "fs_export_particles",
     "ts_stack", "ts_aretomo", "ts_etomo_fiducials", "ts_etomo_patches",
     "ts_ctf", "ts_reconstruct", "ts_template_match", "ts_export_particles",
+    # Not in the published reference, but listed by its --help (2.0.0).
+    "ts_autolevel",
 ))
 
 
@@ -274,6 +282,37 @@ def motion_correct(config, force=None, dry_run=False):
         return _motion_correct(config, log, force=force, dry_run=dry_run)
 
 
+#: Completion marker of motion_correct, in logs/.state/. Written ONLY when
+#: the step returned success - unlike the generic StepLog ".done" marker,
+#: which is also written when a step finishes with reported failures. Its
+#: existence is the one thing the resume check looks at: existing output
+#: alone used to make a restart after a crash skip the unfinished step.
+_MOTION_MARKER = "motion_correct.complete"
+_MARKER_OK = "complete"
+
+
+def _motion_marker_path(config):
+    return os.path.join(config.state_dir, _MOTION_MARKER)
+
+
+def motion_correct_completed(config):
+    """True when motion_correct last finished successfully. A project from
+    before this marker existed has none, so its step 1 runs once more."""
+    try:
+        with open(_motion_marker_path(config), encoding="utf-8") as handle:
+            return handle.read().split("\n", 1)[0].strip() == _MARKER_OK
+    except OSError:
+        return False
+
+
+def _write_motion_marker(config, state):
+    """*state* "complete", or anything else to invalidate the marker -
+    overwritten, never deleted, like StepLog's own markers."""
+    with open(os.path.join(ensure_dir(config.state_dir), _MOTION_MARKER),
+              "w", encoding="utf-8") as handle:
+        handle.write("%s\n%s\n" % (state, time.strftime("%Y-%m-%d %H:%M:%S")))
+
+
 def _motion_correct(config, log, force=False, dry_run=False):
     banner("WarpTools motion correction + CTF (fs_motion_and_ctf)")
     config.require("warptools", "WarpTools")
@@ -282,10 +321,20 @@ def _motion_correct(config, log, force=False, dry_run=False):
     frameseries_dir = ensure_dir(config.warp_frameseries_dir)
     logs = ensure_dir(config.logs_dir)
 
-    if not force and os.path.isfile(settings_path) and _has_any_files(frameseries_dir):
-        log.note("skipped: %s already has WarpTools frame-series output. "
-                 "Use --force to redo it." % frameseries_dir)
+    if not force and motion_correct_completed(config):
+        log.note("skipped: motion_correct already finished successfully "
+                 "(marker %s). Use --force to redo it."
+                 % _motion_marker_path(config))
         return 0
+    if not force and os.path.isfile(settings_path) and _has_any_files(frameseries_dir):
+        log.note("%s has frame-series output, but motion_correct never "
+                 "finished successfully (no %s) - an earlier run was "
+                 "interrupted or failed, or the project predates this marker. "
+                 "Running it again." % (frameseries_dir, _MOTION_MARKER))
+
+    if not dry_run:
+        # From here on the step counts as unfinished until it returns success.
+        _write_motion_marker(config, "running")
 
     config.require_input_frames()
     log.note(gpu_id_note("warptools", config.gpus))
@@ -380,6 +429,7 @@ def _motion_correct(config, log, force=False, dry_run=False):
     for series in series_list:
         log.ok(series.name)
     log.note("frame-series output: %s" % frameseries_dir)
+    _write_motion_marker(config, _MARKER_OK)
     return 0
 
 
@@ -576,6 +626,108 @@ def used_tilt_angles(config, tomo_name):
                  "ignoring <UseTilt>, using every angle."
                  % (tomo_name, len(flags), len(angles), xml_path))
     return angles
+
+
+def _all_xml_angles(config, tomo_name):
+    """Every value in ``<Angles>`` of the series' XML (used or not), or a
+    string saying why there are none."""
+    import xml.etree.ElementTree as ET
+
+    xml_path = os.path.join(config.warp_tiltseries_dir, tomo_name + ".xml")
+    try:
+        root = ET.parse(xml_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        return "XML cannot be read (%s)" % exc
+    element = root.find("Angles")
+    if element is None or not (element.text or "").strip():
+        return "no <Angles> in the XML"
+    try:
+        return [float(x) for x in element.text.split()]
+    except ValueError:
+        return "non-numeric value in <Angles>"
+
+
+def angle_problem(angles):
+    """Why a tilt series' XML angles are unusable, or None if they look sane.
+
+    Catches what ts_aretomo3 has been seen to leave behind - e.g.
+    4.7452948E+27 for every tilt - before ts_defocus_hand turns it into a
+    misleading "correlation is 0" crash.
+    """
+    import math
+
+    if isinstance(angles, str):
+        return angles
+    if not angles:
+        return "no tilt angles"
+    bad = [a for a in angles if not math.isfinite(a)]
+    if bad:
+        return "%d non-finite angle(s) (NaN/inf)" % len(bad)
+    beyond = [a for a in angles if abs(a) > 90.0]
+    if beyond:
+        return ("%d angle(s) beyond +/-90 deg (e.g. %g)"
+                % (len(beyond), beyond[0]))
+    if len(angles) > 1 and max(angles) - min(angles) < 1e-6:
+        return "all %d angles identical (%g)" % (len(angles), angles[0])
+    return None
+
+
+def check_xml_angles(config, series_names, log, when):
+    """Stop (return False) if any tilt series' XML has unusable ``<Angles>``
+    (see :func:`angle_problem`), naming each series, the files to remove and
+    the alternative of re-aligning. *when* says where in the pipeline this
+    runs, for the message."""
+    broken = []
+    for name in series_names:
+        problem = angle_problem(_all_xml_angles(config, name))
+        if problem:
+            broken.append((name, problem))
+    if not broken:
+        log.note("XML tilt angles checked (%s): all %d tilt series sane"
+                 % (when, len(series_names)))
+        return True
+
+    names = [name for name, _ in broken]
+    files = []
+    for name in names:
+        for path in (os.path.join(config.warp_tiltseries_dir, name + ".xml"),
+                     os.path.join(config.tomostar_dir, name + ".tomostar")):
+            if os.path.isfile(path):
+                files.append(path)
+    lines = [
+        "%d tilt series have unusable tilt angles in their WarpTools XML "
+        "(checked %s):" % (len(broken), when),
+        "",
+    ]
+    lines += ["    %-40s %s" % (name, problem) for name, problem in broken]
+    lines += [
+        "",
+        "Nothing after this point can work on them (ts_defocus_hand would "
+        "crash with a misleading 'correlation is 0'), so the run stops here.",
+        "",
+        "This may not be a problem of the series itself - a failed or "
+        "interrupted alignment run can leave such values. Either:",
+        "",
+        "  1. re-align, to give them another try:",
+        "",
+        "         tomo_denoising align_tiltseries --force",
+        "",
+        "  2. or leave them out for good. This pipeline never deletes files "
+        "itself - remove these, then re-run without --force:",
+        "",
+    ]
+    lines += ["         rm %s" % shlex.quote(p) for p in files]
+    moves = mdoc_move_commands(config, names)
+    if moves:
+        lines += ["", "     and move their mdocs out of the mdoc folders:", ""]
+        lines += ["     " + line for line in moves]
+    message = "\n".join(lines)
+    import sys
+    print("\nERROR: " + message + "\n", file=sys.stderr)
+    log.fail("tilt angles", "unusable <Angles> in %d XML(s): %s"
+             % (len(broken), ", ".join(names)))
+    log.quiet(message)
+    return False
 
 
 # --------------------------------------------------- our own tilt axis search
@@ -871,6 +1023,222 @@ def refine_tilt_axis(config, series_names, align_angpix, log,
     return angle
 
 
+# ----------------------------------------- IMOD (aligner: "imod") alignment
+
+
+def _etomo_patches_command(config, settings_path, align_angpix, axis, *extra):
+    """``ts_etomo_patches`` with the settings every call shares (search
+    rounds and final alignment): the alignment pixel size, min_fov,
+    patch size, processes per GPU and the axis to start from."""
+    wt = config["warptools"]
+    return _warp(
+        config, "ts_etomo_patches",
+        "--settings", settings_path,
+        "--angpix", "%.4f" % align_angpix,
+        "--min_fov", "%g" % float(wt["min_fov"]),
+        "--patch_size", "%g" % imod_patch_size(config)[0],
+        "--perdevice", str(int(wt["perdevice"])),
+        "--initial_axis", "%.4f" % axis,
+        *extra)
+
+
+#: imod.patch_size "auto": the field of view's short side divided by this,
+#: rounded to IMOD_PATCH_ROUND, never below IMOD_PATCH_MIN (WarpTools'
+#: default). Fitted to the MissAlignment authors' values for
+#: ts_etomo_patches (500 A at 1.0 A/px, 1000 A at 1.7 A/px, 1500-2000 A
+#: above 2.5 A/px - assuming a K3 field of view). It keeps the number of
+#: patches per tilt roughly constant (WarpTools overlaps them by 0.8): too
+#: many, too-small patches made IMOD's tiltalign crash (warpem/warp#448).
+IMOD_PATCH_DIVISOR = 7
+IMOD_PATCH_ROUND = 100.0
+IMOD_PATCH_MIN = 500.0
+
+
+def imod_patch_size(config):
+    """``(patch size in A, how it was chosen)`` for ts_etomo_patches.
+
+    A number in ``imod.patch_size`` is used as it is. ``"auto"``: from the
+    smallest short side of the field of view (``ImageDimensionsAngstrom``)
+    over every imported XML - see :data:`IMOD_PATCH_DIVISOR`. The patch is a
+    physical size: WarpTools hands IMOD ``patch_size / --angpix`` pixels of
+    the stack it builds at --angpix (align_angpix), so it covers the same
+    area whatever that pixel size is. Without a readable XML (dry run):
+    :data:`IMOD_PATCH_MIN`."""
+    raw = config["imod"]["patch_size"]
+    if str(raw).strip().lower() != "auto":
+        return float(raw), "imod.patch_size"
+    shortest = None
+    for name in aligned_series_names(config, include_excluded=True):
+        value = _xml_root_attr(config, name, "ImageDimensionsAngstrom") or ""
+        try:
+            sides = [float(v) for v in value.replace(",", " ").split()]
+        except ValueError:
+            continue
+        if len(sides) >= 2 and min(sides[:2]) > 0:
+            side = min(sides[:2])
+            shortest = side if shortest is None else min(shortest, side)
+    if shortest is None:
+        return IMOD_PATCH_MIN, ("auto - no field of view readable from the "
+                                "XMLs yet, using %g A" % IMOD_PATCH_MIN)
+    size = max(IMOD_PATCH_MIN, round(shortest / IMOD_PATCH_DIVISOR
+                                     / IMOD_PATCH_ROUND) * IMOD_PATCH_ROUND)
+    return size, ("auto - field of view short side %.0f A / %d, rounded to "
+                  "%g A, at least %g A" % (shortest, IMOD_PATCH_DIVISOR,
+                                          IMOD_PATCH_ROUND, IMOD_PATCH_MIN))
+
+
+def _imod_run_env(config):
+    """The GPU environment every call here gets, plus IMOD on the PATH."""
+    env = dict(_gpu_env(config) or {})
+    env.update(imod.imod_env(config))
+    return env
+
+
+def imod_starting_axis(config):
+    """``imod.initial_tilt_axis`` as a number, or ``None`` when empty (the
+    starting axis then comes from the AreTomo search)."""
+    raw = str(config["imod"]["initial_tilt_axis"] or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit("ERROR: imod.initial_tilt_axis must be a number of "
+                         "degrees (or empty), got %r" % raw)
+
+
+def refine_tilt_axis_imod(config, series_names, settings_path, align_angpix,
+                          seed, seed_source, log, force=False, dry_run=False):
+    """Refine the starting axis *seed* with IMOD and return the result.
+
+    ``imod.tilt_axis_iterations`` rounds, each one ``ts_etomo_patches
+    --do_axis_search`` on a random subset (``imod.tilt_axis_subset_size``),
+    starting from the previous round's result; stops early once a round
+    moves less than :data:`imod.CONVERGED_CHANGE_DEG`. Each round writes
+    into its own ``tiltaxis_search_imod/round_<n>/`` (``--output_processing``,
+    reading the imported XMLs via ``--input_processing``), never into
+    warp_tiltseries/ itself. 0 rounds: *seed* is returned as it is.
+
+    *seed_source* is "aretomo" or "config" (see :func:`imod.write_report`).
+    """
+    settings = config["imod"]
+    iterations = int(settings["tilt_axis_iterations"])
+    if iterations <= 0:
+        info("imod.tilt_axis_iterations is 0 - aligning with the starting "
+             "axis %+.4f deg as it is." % seed)
+        log.note("IMOD tilt axis: %+.4f deg, the starting axis as it is "
+                 "(imod.tilt_axis_iterations: 0)" % seed)
+        if not dry_run:
+            imod.write_report(config, seed, seed_source, [], seed,
+                              note="imod.tilt_axis_iterations is 0 - no IMOD "
+                                   "axis search was performed.")
+        return seed
+
+    if not force and not dry_run:
+        previous = imod.read_converged_angle(config, seed)
+        if previous is not None:
+            info("reusing the IMOD tilt axis %+.4f deg from %s"
+                 % (previous, tiltaxis.report_path(config)))
+            log.note("IMOD tilt axis: reused %+.4f deg from a previous run"
+                     % previous)
+            return previous
+
+    subset_size = int(settings["tilt_axis_subset_size"])
+    subset_seed = "imod-%s" % settings["tilt_axis_seed"]
+    banner("IMOD tilt axis search (up to %d round(s), %d tilt series each)"
+           % (iterations, min(subset_size, len(series_names))))
+    info("starting from %+.4f deg (%s)"
+         % (seed, "AreTomo search" if seed_source == "aretomo"
+            else "imod.initial_tilt_axis"))
+    env = _imod_run_env(config)
+    logs = ensure_dir(config.logs_dir, "tiltaxis_search_imod")
+
+    rows, angle, measured = [], seed, False
+    for round_number in range(1, iterations + 1):
+        names = tiltaxis.choose_subset(sorted(series_names), subset_size,
+                                       subset_seed, round_number)
+        info("round %d/%d on: %s" % (round_number, iterations, ", ".join(names)))
+        round_dir = ensure_dir(config.imod_axis_search_dir,
+                               "round_%d" % round_number)
+        list_path = os.path.join(round_dir, "input_series.txt")
+        if not dry_run:
+            with open(list_path, "w", encoding="utf-8") as handle:
+                for name in names:
+                    handle.write(os.path.join(config.tomostar_dir,
+                                              name + ".tomostar") + "\n")
+        command = _etomo_patches_command(
+            config, settings_path, align_angpix, angle,
+            "--do_axis_search",
+            "--input_data", list_path,
+            "--input_processing", config.warp_tiltseries_dir,
+            "--output_processing", round_dir)
+        log_file = os.path.join(logs, "round_%d.log" % round_number)
+        started = time.time()
+        code = run_command(command, cwd=config.processing_dir, env=env,
+                           log_file=log_file, check=False, dry_run=dry_run)
+        if dry_run:
+            continue
+
+        label = "ts_etomo_patches (IMOD axis search round %d)" % round_number
+        outcome = _warp_outcome(code, log_file, label, None)
+        measurements = {}
+        for name in names:
+            xml_path = os.path.join(round_dir, name + ".xml")
+            fresh = (outcome is not None and name not in outcome.failed
+                     and os.path.isfile(xml_path)
+                     and os.path.getmtime(xml_path) >= started - 1)
+            measurements[name] = imod.xml_tilt_axis(xml_path) if fresh else None
+
+        combined, method = None, "no result"
+        if outcome is not None:
+            combined = imod.log_average_axis(log_file)
+            if combined is not None:
+                method = "WarpTools' median, from its log"
+            else:
+                combined, method = tiltaxis.combine_tilt_axes(
+                    [v for v in measurements.values() if v is not None])
+        change = None if combined is None else imod.axis_change(angle, combined)
+        rows.append({"round": round_number, "initial": angle,
+                     "measurements": measurements, "angle": combined,
+                     "method": method, "change": change})
+        if combined is None:
+            warn("IMOD round %d produced no tilt axis - see %s"
+                 % (round_number, log_file))
+            continue
+        info("round %d: %+.3f deg (%s), %.3f deg from its start"
+             % (round_number, combined, method, change))
+        angle, measured = combined, True
+        if change < imod.CONVERGED_CHANGE_DEG:
+            if round_number < iterations:
+                info("changed by less than %.1f deg - converged, stopping "
+                     "the search." % imod.CONVERGED_CHANGE_DEG)
+            break
+
+    if dry_run:
+        return seed
+    if not measured:
+        imod.write_report(config, seed, seed_source, rows, None,
+                          note="No IMOD round produced a tilt axis.")
+        raise SystemExit(
+            "ERROR: the IMOD tilt axis search (imod.tilt_axis_iterations: %d) "
+            "produced no tilt axis in any round - see the logs in %s, and "
+            "WarpTools' own in %s.\nIs IMOD (batchruntomo) reachable - "
+            "executables.imod / conda_env_imod? Set imod.tilt_axis_iterations "
+            "to 0 to align with the starting axis %+.4f deg directly."
+            % (iterations, logs, os.path.join(config.warp_tiltseries_dir, "logs"),
+               seed))
+
+    total = imod.axis_change(seed, angle)
+    if total > imod.LARGE_CHANGE_DEG:
+        warn("IMOD moved the tilt axis by %.1f deg from its starting axis "
+             "(%+.3f -> %+.3f) - check %s." % (total, seed, angle,
+                                              tiltaxis.report_path(config)))
+    imod.write_report(config, seed, seed_source, rows, angle)
+    log.note("IMOD tilt axis: %+.4f deg (started from %+.4f, %.3f deg apart)"
+             % (angle, seed, total))
+    return angle
+
+
 # ------------------------------------------------------- mdoc preparation
 
 
@@ -1034,15 +1402,20 @@ def _prepare_mdocs(config, series_list, log, force=False, dry_run=False):
             names = sorted({tomo_name_from_mdoc(p) if p.lower().endswith(".mdoc")
                             else os.path.splitext(os.path.basename(p))[0]
                             for p in stale})
+            moves = mdoc_move_commands(config, names)
             raise SystemExit(
                 "ERROR: files from an earlier run would bring back %d tilt "
                 "series that are no longer imported (excluded by "
                 "tiltseries_filter, or their mdoc is no longer in "
                 "mdocs.preprocessing): %s\n\n"
                 "This pipeline never deletes files itself. Remove these, then "
-                "re-run - nothing else needs to be redone:\n\n%s"
+                "re-run - nothing else needs to be redone:\n\n%s%s"
                 % (len(names), ", ".join(names),
-                   "\n".join("    rm %s" % shlex.quote(p) for p in stale)))
+                   "\n".join("    rm %s" % shlex.quote(p) for p in stale),
+                   ("\n\nIf they are flawed for good, also move their mdocs "
+                    "out of the mdoc folders, so no later step (e.g. the "
+                    "denoiser's prediction) picks them up again:\n\n"
+                    + "\n".join(moves)) if moves else ""))
 
     if not use_filtered:
         return original_dir, import_series, record
@@ -1057,7 +1430,8 @@ def _prepare_mdocs(config, series_list, log, force=False, dry_run=False):
             else:
                 # Unchanged series are linked through, not re-written. force:
                 # an earlier run may have left a filtered COPY here.
-                link_file(series.mdoc_path, target, force=True)
+                link_file(series.mdoc_path, target, force=True,
+                          within=config.processing_dir)
     return filtered_dir, import_series, record
 
 
@@ -1082,15 +1456,43 @@ def _read_ts_aretomo_marker(config):
     by us, after a ts_aretomo3 call, and lists only the series that call
     actually aligned (see :func:`_judge_aretomo`).
     """
+    data = _marker_data(config)
+    if data is None:
+        return None
+    return set(data.get("series_names") or [])
+
+
+def _marker_data(config):
+    """The completion marker's content, or ``None``. (Its name is from the
+    AreTomo-only days; it marks the final alignment of either aligner.)"""
     path = _ts_aretomo_marker_path(config)
     if not os.path.isfile(path):
         return None
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
-        return set(data.get("series_names") or [])
     except (ValueError, OSError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def marker_aligner(config):
+    """Which aligner wrote the current alignment ("aretomo" for markers from
+    before the setting existed), or ``None`` without a marker."""
+    data = _marker_data(config)
+    if data is None:
+        return None
+    return str(data.get("aligner") or "aretomo")
+
+
+def marker_autolevel(config):
+    """Whether the current alignment was leveled by ts_autolevel (False for
+    markers from before the setting existed), or ``None`` without a
+    marker."""
+    data = _marker_data(config)
+    if data is None:
+        return None
+    return bool(data.get("autolevel", False))
 
 
 def _check_tomostars(config, series_names, log):
@@ -1152,6 +1554,27 @@ def _xml_root_attr(config, name, attr):
     return value.group(1) if value else None
 
 
+def level_angles(config, name):
+    """``(LevelAngleX, LevelAngleY)`` in degrees from the series' XML
+    (written by ts_autolevel; 0 otherwise), or ``None`` without an XML.
+
+    How WarpTools uses them (TiltSeries.cs): every projection is
+    ``Euler(0, angle + LevelAngleY, -axis) * RotateX(LevelAngleX)`` - so
+    LevelAngleY is an offset on every tilt angle (not stored in
+    ``<Angles>``), LevelAngleX a rotation about the other in-plane axis."""
+    values = []
+    for attr in ("LevelAngleX", "LevelAngleY"):
+        raw = _xml_root_attr(config, name, attr)
+        if raw is None and not os.path.isfile(
+                os.path.join(config.warp_tiltseries_dir, name + ".xml")):
+            return None
+        try:
+            values.append(float(raw) if raw not in (None, "") else 0.0)
+        except ValueError:
+            values.append(0.0)
+    return tuple(values)
+
+
 def _xml_unselected(config, name):
     """Whether WarpTools marked ``warp_tiltseries/<name>.xml`` unselected
     (``UnselectManual="True"`` - what it does to a series a command failed
@@ -1159,18 +1582,19 @@ def _xml_unselected(config, name):
     return (_xml_root_attr(config, name, "UnselectManual") or "").lower() == "true"
 
 
-def _judge_aretomo(config, series_names, logged_failed):
-    """``(aligned, {name: reason})`` after a ts_aretomo3 run that got
-    through (see :func:`_warp_outcome`): a series failed if WarpTools
-    reported it ("Failed to process", *logged_failed*) or left it marked
-    unselected - which also covers one skipped for having been unselected
-    by an earlier run. Every other series was aligned."""
+def _judge_aretomo(config, series_names, logged_failed, program="AreTomo3"):
+    """``(aligned, {name: reason})`` after a ts_aretomo3 (or
+    ts_etomo_patches - *program* names it) run that got through (see
+    :func:`_warp_outcome`): a series failed if WarpTools reported it
+    ("Failed to process", *logged_failed*) or left it marked unselected -
+    which also covers one skipped for having been unselected by an earlier
+    run. Every other series was aligned."""
     logs_dir = os.path.join(config.warp_tiltseries_dir, "logs")
     aligned, failed = [], {}
     for name in series_names:
         if name in logged_failed or _xml_unselected(config, name):
-            failed[name] = ("AreTomo3 produced no alignment (WarpTools marked "
-                            "it unselected) - see %s" % logs_dir)
+            failed[name] = ("%s produced no alignment (WarpTools marked "
+                            "it unselected) - see %s" % (program, logs_dir))
         else:
             aligned.append(name)
     return aligned, failed
@@ -1180,6 +1604,9 @@ def _write_ts_aretomo_marker(config, series_names, converged):
     path = _ts_aretomo_marker_path(config)
     data = {
         "series_names": sorted(series_names),
+        "aligner": getattr(config, "aligner", "aretomo"),
+        # Only ever written after ts_autolevel succeeded (or was off).
+        "autolevel": bool(getattr(config, "autolevel", False)),
         "converged_axis": converged,
         "written": time.strftime("%Y-%m-%d %H:%M:%S"),
         # Identifies THIS alignment - see alignment_id().
@@ -1201,6 +1628,65 @@ def alignment_id(config):
         return None
     # Markers from before the id existed: their timestamp serves the same.
     return data.get("alignment_id") or data.get("written")
+
+
+def _autolevel(config, settings_path, align_angpix, series_names, env, logs,
+               log, dry_run=False):
+    """EXPERIMENTAL (autolevel.enabled): WarpTools ts_autolevel on the just
+    aligned *series_names*, which writes LevelAngleX/Y into their XMLs.
+
+    Any failure stops the run (SystemExit) - unlike an alignment failure,
+    nothing is excluded: a series without leveling would silently differ
+    from the rest. The angles found are logged per series."""
+    banner("align_tiltseries  ts_autolevel (EXPERIMENTAL leveling)")
+    list_path = os.path.join(logs, "ts_autolevel_series.txt")
+    if not dry_run:
+        with open(list_path, "w", encoding="utf-8") as handle:
+            for name in series_names:
+                handle.write(os.path.join(config.tomostar_dir,
+                                          name + ".tomostar") + "\n")
+    command = _warp(
+        config, "ts_autolevel",
+        "--settings", settings_path,
+        "--angpix", "%.4f" % align_angpix,
+        "--patch_size", "%g" % float(config["autolevel"]["patch_size"]),
+        "--perdevice", str(int(config["warptools"]["perdevice"])),
+        "--input_data", list_path,
+    )
+    log_file = os.path.join(logs, "ts_autolevel.log")
+    code = run_command(command, cwd=config.processing_dir, env=env,
+                       log_file=log_file, check=False, dry_run=dry_run)
+    if dry_run:
+        return
+
+    outcome = _warp_outcome(code, log_file, "ts_autolevel", log)
+    failed = set() if outcome is None else set(outcome.failed)
+    failed |= {name for name in series_names if _xml_unselected(config, name)}
+    if outcome is None or failed:
+        what = ("ts_autolevel exited with status %d" % code if outcome is None
+                else "ts_autolevel failed for %d tilt series: %s"
+                % (len(failed), ", ".join(sorted(failed))))
+        raise SystemExit(
+            "ERROR: %s - see %s and %s.\n"
+            "The run stops here instead of going on with tilt series leveled "
+            "differently. Fix the cause and re-run (the alignment is redone), "
+            "or set autolevel.enabled: false. WarpTools marks a series it "
+            "gave up on unselected in its XML; re-select it with WarpTools "
+            "change_selection before re-running."
+            % (what, log_file, os.path.join(config.warp_tiltseries_dir, "logs")))
+
+    lines = []
+    for name in series_names:
+        angles = level_angles(config, name)
+        if angles is None:
+            lines.append("    %-28s  no XML" % name)
+        else:
+            lines.append("    %-28s  LevelAngleX %+7.2f   LevelAngleY %+7.2f"
+                         % ((name,) + angles))
+    info("ts_autolevel: leveled %d tilt series" % len(series_names))
+    log.note("ts_autolevel (EXPERIMENTAL) leveled %d tilt series:\n%s"
+             % (len(series_names), "\n".join(lines)))
+    log.task("ts_autolevel", True, "-")
 
 
 # -------------------------------------------------------------- entrypoint
@@ -1260,8 +1746,21 @@ def align_tiltseries(config, force=None, dry_run=False):
 
 def _align_tiltseries(config, log, force=False, dry_run=False):
     banner("WarpTools tilt-series import, stacking and alignment")
-    for key, purpose in (("warptools", "WarpTools"), ("aretomo", "AreTomo")):
-        config.require(key, purpose)
+    use_imod = config.aligner == "imod"
+    # aligner "imod" with imod.initial_tilt_axis set needs no AreTomo at
+    # all (no ts_stack, no AreTomo search) - see refine_tilt_axis_imod.
+    imod_seed = imod_starting_axis(config) if use_imod else None
+    use_aretomo = not use_imod or imod_seed is None
+    config.require("warptools", "WarpTools")
+    if use_aretomo:
+        config.require("aretomo", "AreTomo")
+    if use_imod:
+        imod.require_imod(config)
+    log.note("aligner: %s%s" % (
+        "IMOD (ts_etomo_patches)" if use_imod else "AreTomo3 (ts_aretomo3)",
+        "" if not use_imod else
+        (", starting axis from imod.initial_tilt_axis (%+.4f deg)" % imod_seed
+         if imod_seed is not None else ", starting axis from the AreTomo search")))
 
     if not dry_run and not (os.path.isfile(config.warp_frameseries_settings_path)
                             and _has_any_files(config.warp_frameseries_dir)):
@@ -1289,7 +1788,7 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
     warp_excluded = {name for name, entry in record.items()
                      if entry.get("stage") != tiltfilter.STAGE_TILT_CHECK}
     aretomo_failed = {name for name, entry in record.items()
-                      if entry.get("stage") == tiltfilter.STAGE_ARETOMO}
+                      if entry.get("stage") in tiltfilter.ALIGN_STAGES}
     if warp_excluded:
         log.note("a WarpTools step gave up on these before - left out until "
                  "align_tiltseries --force: %s" % ", ".join(sorted(warp_excluded)))
@@ -1414,8 +1913,12 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
         _warn_settings_binning(config, settings_path, log)
 
     # --- 3. ts_stack ------------------------------------------------------
+    # Input of the AreTomo search only (ts_etomo_patches stacks for itself).
     banner("align_tiltseries 3/5  ts_stack")
-    if force or not _has_any_files(config.tiltstack_dir):
+    if not use_aretomo:
+        log.note("aligner imod with imod.initial_tilt_axis set - no AreTomo "
+                 "search, so no ts_stack")
+    elif force or not _has_any_files(config.tiltstack_dir):
         command = _warp(config, "ts_stack",
                         "--settings", settings_path,
                         "--angpix", "%.4f" % align_angpix)
@@ -1444,6 +1947,19 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
     # would be wrong.
     marker_series = None if force else _read_ts_aretomo_marker(config)
     need_alignment = marker_series is None or not (set(series_names) <= marker_series)
+    previous_aligner = marker_aligner(config)
+    if (not need_alignment and previous_aligner is not None
+            and previous_aligner != config.aligner):
+        log.note("the current alignment was made with aligner %r, the config "
+                 "now says %r - aligning again" % (previous_aligner, config.aligner))
+        need_alignment = True
+    previous_level = marker_autolevel(config)
+    if (not need_alignment and previous_level is not None
+            and previous_level != config.autolevel):
+        log.note("the current alignment was %s, autolevel.enabled is now %s "
+                 "- aligning again" % ("leveled" if previous_level else
+                                      "not leveled", config.autolevel))
+        need_alignment = True
 
     if need_alignment:
         # A new alignment invalidates any MissAlignment state built on the
@@ -1457,18 +1973,45 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
     banner("align_tiltseries 4/5  tilt axis refinement")
     alignz_angstrom = resolve_alignz_angstrom(config, apix, log=log)
 
+    final_program = "ts_etomo_patches" if use_imod else "ts_aretomo3"
+    if need_alignment and use_imod:
+        patch, how = imod_patch_size(config)
+        info("IMOD patch size: %g A (%s), %.0f px at --angpix %.4f"
+             % (patch, how, patch / align_angpix, align_angpix))
+        log.note("IMOD patch size %g A (%s)" % (patch, how))
     if need_alignment:
-        converged = refine_tilt_axis(config, series_names, align_angpix, log,
-                                     alignz_angstrom=alignz_angstrom,
-                                     force=force, dry_run=dry_run)
+        if use_aretomo:
+            converged = refine_tilt_axis(config, series_names, align_angpix, log,
+                                         alignz_angstrom=alignz_angstrom,
+                                         force=force, dry_run=dry_run)
+        else:
+            converged = imod_seed
+        if use_imod:
+            # IMOD only refines from a starting axis - never from the mdoc's.
+            seed_source = "config" if imod_seed is not None else "aretomo"
+            if converged is None:
+                if not dry_run:
+                    raise SystemExit(
+                        "ERROR: aligner \"imod\" needs a starting tilt axis, "
+                        "and none was determined: imod.initial_tilt_axis is "
+                        "empty and the AreTomo search is switched off "
+                        "(aretomo.tilt_axis_iterations: 0, no "
+                        "aretomo.initial_tilt_axis). Set imod.initial_tilt_axis, "
+                        "or aretomo.tilt_axis_iterations above 0.")
+                warn("dry run: no starting axis measured - the IMOD commands "
+                     "below show 0.0 in its place.")
+                converged = 0.0
+            converged = refine_tilt_axis_imod(
+                config, series_names, settings_path, align_angpix,
+                converged, seed_source, log, force=force, dry_run=dry_run)
     else:
         converged = None
-        log.note("ts_aretomo3 already completed for these tilt series (marker: "
-                 "%s) - skipping the tilt axis search and ts_aretomo3"
-                 % _ts_aretomo_marker_path(config))
+        log.note("%s already completed for these tilt series (marker: "
+                 "%s) - skipping the tilt axis search and %s"
+                 % (final_program, _ts_aretomo_marker_path(config), final_program))
 
-    # --- 5. native ts_aretomo3, axis fixed, no search -----------------------
-    banner("align_tiltseries 5/5  ts_aretomo3 (native)")
+    # --- 5. native ts_aretomo3 / ts_etomo_patches, axis fixed, no search -----
+    banner("align_tiltseries 5/5  %s (native)" % final_program)
 
     if need_alignment:
         if converged is not None:
@@ -1478,47 +2021,68 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
                        check=False, dry_run=dry_run)
             log.note("re-imported with OVERRIDE_AXIS %+.4f deg" % converged)
 
-        command = _warp(
-            config, "ts_aretomo3",
-            "--settings", settings_path,
-            "--exe", config.exe("aretomo"),
-            "--angpix", "%.4f" % align_angpix,
-            "--min_fov", str(int(wt["min_fov"])),
-            "--perdevice", str(int(wt["perdevice"])),
-        )
-        # --alignz wants the thickness in ANGSTROM (unlike AreTomo3's own
-        # -AlignZ, which is in stack pixels - see resolve_alignz_angstrom),
-        # and it is an INTEGER field (same pattern as --c_voltage; a decimal
-        # value fails its parser). Omitted entirely when aretomo.alignz is
-        # empty, leaving ts_aretomo3 at its own default.
-        if alignz_angstrom is not None:
-            command += ["--alignz", str(int(round(alignz_angstrom)))]
-        if converged is not None:
-            command += ["--axis", "%.4f" % converged, "--axis_iter", "0"]
-        log_file = os.path.join(logs, "ts_aretomo3.log")
-        code = run_command(command, cwd=config.processing_dir, env=env,
+        if use_imod:
+            # The axis is fixed: no --do_axis_search.
+            command = _etomo_patches_command(config, settings_path,
+                                             align_angpix, converged)
+            final_env = _imod_run_env(config)
+        else:
+            command = _warp(
+                config, "ts_aretomo3",
+                "--settings", settings_path,
+                "--exe", config.exe("aretomo"),
+                "--angpix", "%.4f" % align_angpix,
+                "--min_fov", str(int(wt["min_fov"])),
+                "--perdevice", str(int(wt["perdevice"])),
+            )
+            # --alignz wants the thickness in ANGSTROM (unlike AreTomo3's own
+            # -AlignZ, which is in stack pixels - see resolve_alignz_angstrom),
+            # and it is an INTEGER field (same pattern as --c_voltage; a decimal
+            # value fails its parser). Omitted entirely when aretomo.alignz is
+            # empty, leaving ts_aretomo3 at its own default.
+            if alignz_angstrom is not None:
+                command += ["--alignz", str(int(round(alignz_angstrom)))]
+            if converged is not None:
+                command += ["--axis", "%.4f" % converged, "--axis_iter", "0"]
+            final_env = env
+        log_file = os.path.join(logs, "%s.log" % final_program)
+        code = run_command(command, cwd=config.processing_dir, env=final_env,
                            log_file=log_file, check=False, dry_run=dry_run)
         if not dry_run:
-            outcome = _warp_outcome(code, log_file, "ts_aretomo3", log)
+            outcome = _warp_outcome(code, log_file, final_program, log)
             if outcome is None:
                 return 1
             # WarpTools runs every imported .tomostar, including series that
             # failed in an earlier run - judge them all, so one that now
             # succeeds leaves the record again.
             judged = sorted(set(series_names) | aretomo_failed)
-            aligned, failed = _judge_aretomo(config, judged, outcome.failed)
+            aligned, failed = _judge_aretomo(
+                config, judged, outcome.failed,
+                program="IMOD (ts_etomo_patches)" if use_imod else "AreTomo3")
             if not aligned:
-                log.fail("ts_aretomo3", "no tilt series aligned - see %s" % log_file)
+                log.fail(final_program, "no tilt series aligned - see %s" % log_file)
                 return 1
             record = tiltfilter.read_record(config)
             for name in aligned:
-                if record.get(name, {}).get("stage") == tiltfilter.STAGE_ARETOMO:
+                if record.get(name, {}).get("stage") in tiltfilter.ALIGN_STAGES:
                     del record[name]
             tiltfilter.write_record(config, record)
-            tiltfilter.record_failures(config, tiltfilter.STAGE_ARETOMO, failed)
+            tiltfilter.record_failures(
+                config, tiltfilter.STAGE_ETOMO if use_imod else tiltfilter.STAGE_ARETOMO,
+                failed)
             series_names = sorted(aligned)
+        log.task(final_program, True, "-")
+        if config.autolevel:
+            # Before the marker: if this stops, the next run aligns (and
+            # levels) again instead of resuming an unleveled alignment.
+            _autolevel(config, settings_path, align_angpix, series_names,
+                       env, logs, log, dry_run=dry_run)
+        if not dry_run:
             _write_ts_aretomo_marker(config, series_names, converged)
-        log.task("ts_aretomo3", True, "-")
+
+    if not dry_run and not check_xml_angles(
+            config, aligned_series_names(config), log, "after %s" % final_program):
+        return 1
 
     if not dry_run:
         aligned = set(aligned_series_names(config))
@@ -1528,7 +2092,8 @@ def _align_tiltseries(config, log, force=False, dry_run=False):
             if name in aligned:
                 log.ok(name)
             else:
-                log.fail(name, "no warp_tiltseries/%s.xml after ts_aretomo3" % name)
+                log.fail(name, "no warp_tiltseries/%s.xml after %s"
+                         % (name, final_program))
         already = {name for name, _ in log.excluded}
         for name, entry in sorted(tiltfilter.read_record(config).items()):
             if name not in already:
@@ -1883,12 +2448,13 @@ def run_ts_reconstruct(config, settings_path, halfmaps_dir, tiltsplit_halfmaps_d
             target = os.path.join(dst_dir, target_name)
             # force matters here even though the target NAME never changes:
             # what it points at does, as soon as a pixel size changed.
-            link_file(source, target, force=force)
+            link_file(source, target, force=force,
+                      within=config.processing_dir)
             if half is None and warp_links_dir:
                 # The same full tomogram once more, under WarpTools' own
                 # name, where its later commands look for it.
                 link_file(source, os.path.join(ensure_dir(warp_links_dir), entry),
-                          force=force)
+                          force=force, within=config.processing_dir)
             linked += 1
             matched_names.add(owner)
 
@@ -2050,6 +2616,12 @@ def _reconstruct_tomograms(config, log, force=False, dry_run=False, halfmaps=Tru
     env = _gpu_env(config)
     logs = ensure_dir(config.logs_dir)
     log.note(gpu_id_note("warptools", config.gpus))
+
+    # Again here, not only at the end of align_tiltseries: this step may be
+    # run on its own, on an alignment made before the check existed.
+    if not dry_run and not check_xml_angles(config, series_names, log,
+                                            "before ts_defocus_hand"):
+        return 1
 
     banner("reconstruct_tomograms 1/3  ts_defocus_hand")
     if not _defocus_hand(config, settings_path, series_names, env, logs, log,

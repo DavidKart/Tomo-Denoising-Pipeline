@@ -50,6 +50,10 @@ MODES = ("exclude", "stop", "off")
 
 STAGE_TILT_CHECK = "tilt_check"
 STAGE_ARETOMO = "ts_aretomo3"
+STAGE_ETOMO = "ts_etomo_patches"
+#: The final-alignment stages (one per aligner): a series excluded at one
+#: of them is judged again by every new alignment.
+ALIGN_STAGES = (STAGE_ARETOMO, STAGE_ETOMO)
 
 #: Below this many tilt series, a dataset median says too little about what
 #: a "normal" series looks like - only the absolute floor and the gap test

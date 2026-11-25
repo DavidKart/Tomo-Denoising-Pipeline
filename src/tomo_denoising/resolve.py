@@ -283,12 +283,19 @@ def run_resolve(config, log, force=False, dry_run=False, input_dir=None,
 
 
 def training_set_size(total):
-    """How many tomograms to train on, given how many there are."""
+    """How many tomograms to train on, given how many there are.
+
+    More tomograms means more variety at about the same run time: IsoNet2
+    spreads a fixed number of subtomograms per epoch over all training
+    tomograms (number_subtomos "auto" = 3000 / number of tomograms). The
+    quality filters (min_signal_ratio, outlier_factor) still keep bad
+    tomograms out, so the set can end up smaller than this.
+    """
     if total >= 20:
-        return 5
+        return 8
     if total >= 10:
-        return 4
-    return 3
+        return 6
+    return 4
 
 
 def select_training_tomograms(config, measurements, log):
@@ -428,7 +435,8 @@ def populate_training_mdocs(config, measurements, log, force=False,
             continue
         target = os.path.join(train_dir, os.path.basename(mdoc))
         if not dry_run:
-            link_file(mdoc, target, force=force)
+            link_file(mdoc, target, force=force,
+                      within=config.processing_dir)
         linked.append(measurement)
         info("  %-28s %7.1f A   signal %.2f"
              % (measurement.tomo, measurement.resolution,

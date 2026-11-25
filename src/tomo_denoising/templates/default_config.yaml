@@ -5,11 +5,16 @@
 #
 #    tomo_denoising motion_correct        WarpTools create_settings + fs_motion_and_ctf
 #    tomo_denoising align_tiltseries      ts_import, ts_stack, tilt axis search, ts_aretomo3
+#                                         (or ts_etomo_patches - see 'aligner')
 #    tomo_denoising reconstruct_tomograms ts_defocus_hand, ts_ctf, ts_reconstruct
 #    tomo_denoising run_missalignment     MissAlignment-refined reconstruction
 #    tomo_denoising quality_check         RESOLVE resolution estimate + report
 #    tomo_denoising train_isonet          IsoNet training     (mdocs.train set)
 #    tomo_denoising predict_isonet        IsoNet denoising    (mdocs.predict set)
+#    tomo_denoising train_cryocare        CryoCARE training   (mdocs.train set)
+#    tomo_denoising predict_cryocare      CryoCARE denoising  (mdocs.predict set)
+#
+#  run_pipe uses ONE denoiser, chosen with 'denoiser' (IsoNet by default).
 #
 #  Or run the whole thing in one go:
 #
@@ -41,7 +46,8 @@
 #  settings get added, renamed or change meaning between versions, and an old
 #  file would otherwise run with silently different behaviour.
 #
-#  After updating the software: write a fresh template with.
+#  After updating the software: write a fresh template with
+#    tomo_denoising create_config -o new_config.yaml
 # -----------------------------------------------------------------------------
 config_version: "__TOMO_DENOISING_VERSION__"
 
@@ -80,8 +86,12 @@ paths:
   #     warp_frameseries.settings / warp_frameseries/   <- fs_motion_and_ctf
   #     tomostar/                                       <- ts_import
   #     warp_tiltseries.settings / warp_tiltseries/      <- alignment + recon
-  #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3)
+  #       <tomo>.xml            per-tomogram alignment (native ts_aretomo3,
+  #                             or ts_etomo_patches with aligner: "imod")
   #       tiltstack/<tomo>/     ts_stack output
+  #       tiltaxis_search/      the AreTomo tilt axis search runs
+  #       tiltaxis_search_imod/ the IMOD tilt axis search rounds
+  #                             (aligner: "imod"), one round_<n>/ each
   #       reconstruction_uncorrected/  ts_reconstruct output from the
   #                             uncorrected alignment, one folder per call and
   #                             pixel size (full_<px>, frames_<px>, tilts_<px>)
@@ -97,9 +107,9 @@ paths:
   #       raw_halfMaps_tiltSplit/  tilt-split half maps - only made when
   #                                quality_check.enable_tilt_split is true
   #       inverted_half-maps_IsoNet2/   contrast-inverted copies of the half
-  #       inverted_half-maps_uncorrected_IsoNet2/   maps IsoNet uses (from
+  #       inverted_half-maps_uncorrected_IsoNet2/   maps the denoisers use (from
   #                             MissAlignment / uncorrected): IsoNet2 expects
-  #                             dark features.
+  #                             dark features; CryoCARE gets the same maps.
   #     warp_tiltseries_prealign/  <- XML backup, taken before MissAlignment
   #     missalignment/             <- MissAlignment-refined reconstructions
   #                                   (reconstruction/) and half maps
@@ -107,9 +117,70 @@ paths:
   #                                   - preferred by default once populated
   #     isonet_config/    <- the IsoNet star files
   #     isonet/            <- IsoNet working directory (networks, masks, output)
+  #     cryocare/          <- CryoCARE working directory (training data,
+  #                           model, denoised/ output) - denoiser: "cryocare"
+  #     removed_mdocs/     <- only ever filled BY YOU, when an error message
+  #                           suggests moving a broken tilt series' mdoc out
   #
-  # The mdoc directories and frame directory may live anywhere.
+  # The mdoc directories and frame directory may live anywhere, but the
+  # processing directory must not be the frame directory.
   processing_directory: "processing"
+
+
+# -----------------------------------------------------------------------------
+#  Which tomograms are used for which task
+# -----------------------------------------------------------------------------
+#  These are DIRECTORIES holding .mdoc files.
+#
+#  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
+#  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
+#  "TS_01.mrc.mdoc" -> tomogram "TS_01".
+# -----------------------------------------------------------------------------
+mdocs:
+
+  # Tilt series to reconstruct.
+  preprocessing: "mdocs"
+
+  # Tilt series used to TRAIN the denoiser (IsoNet or CryoCARE).
+  # A representative subset (4-8 tomograms) is normally plenty.
+  # If there is no knowledge about well-suited tilt-series, this directory
+  # can be auto-filled by estimation of tomogram quality with RESOLVE.
+  # Auto fill only applies when the directory is empty or non-existent.
+  # Must be a DIFFERENT directory from 'preprocessing' - otherwise every
+  # tilt series would be trained on and the auto fill could never run.
+  train: "mdocsTrain"
+
+  # Tilt series to denoise in  predict_isonet / predict_cryocare.
+  predict: "mdocs"
+
+
+# -----------------------------------------------------------------------------
+#  External programs
+# -----------------------------------------------------------------------------
+#  Either a bare name (looked up on PATH) or an absolute path to the binary.
+# -----------------------------------------------------------------------------
+executables:
+  aretomo:    "AreTomo3"
+  isonet:     "isonet.py"
+  resolve:    "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
+  warptools:  "WarpTools"
+  missalign:  "/opt/Tomo-Denoising-Pipeline/bin/miss-alignment"                # run_missalignment
+
+  # Only used with denoiser: "cryocare"
+  cryocare_extract: "cryoCARE_extract_train_data.py"
+  cryocare_train:   "cryoCARE_train.py"
+  cryocare_predict: "cryoCARE_predict.py"
+
+  # IMOD's install FOLDER (what IMOD_DIR points at), not a program - e.g.
+  # "/usr/local/IMOD". Its bin/ is put first on the PATH of ts_etomo_patches
+  # (aligner: "imod" - WarpTools runs IMOD's batchruntomo), and its
+  # bin/header reads the pixel size when acquisition.pixel_size is "read"
+  # and the mdocs carry none. Empty: whatever IMOD is already on the PATH,
+  # or the one in conda_env_imod. Not needed at all otherwise.
+  imod:       ""
+
+  # Only used if one of the conda_env_* settings below is set.
+  conda:      "/path/to/conda"
 
 
 # -----------------------------------------------------------------------------
@@ -137,31 +208,46 @@ conda_env_warptools: ""
 conda_env_aretomo: ""
 conda_env_isonet: ""
 conda_env_resolve: ""
+conda_env_cryocare: ""   # used for all three cryocare_* executables
+# IMOD: header runs via conda run as above; for ts_etomo_patches (which
+# WarpTools runs, possibly in conda_env_warptools) the environment's bin/ -
+# and its IMOD_DIR, if its activation sets one - is put on the PATH instead.
+conda_env_imod: ""
 
 
 # -----------------------------------------------------------------------------
-#  Which tomograms are used for which task
+#  GPUs
 # -----------------------------------------------------------------------------
-#  These are DIRECTORIES holding .mdoc files.
+#  One list, and the ONLY GPUs any program this pipeline runs can see or use:
+#  every external call (WarpTools, AreTomo3 - both this pipeline's own
+#  axis-search runs and native ts_aretomo3 -, RESOLVE, IsoNet,
+#  miss-alignment) is launched with CUDA_VISIBLE_DEVICES set from this list.
 #
-#  ALL *.mdoc files found inside are used. The tomogram name is the mdoc file
-#  name with the .mdoc (and a trailing .mrc/.st/.tif) stripped, so
-#  "TS_01.mrc.mdoc" -> tomogram "TS_01".
-# -----------------------------------------------------------------------------
-mdocs:
+#  Programs that ALSO take GPU ids as arguments are given them automatically,
+#  translated into the 0..N-1 numbering they see inside such a process
+#  (IsoNet --gpuID, AreTomo3 -Gpu, miss-alignment --training-devices /
+#  --reconstruction-devices). Write real GPU ids here and everywhere else in
+#  this file; the translation is never something to do by hand.
+gpus: [0, 1]
 
-  # Tilt series to reconstruct.
-  preprocessing: "mdocs"
-
-  # Tilt series used to TRAIN IsoNet.
-  # A small representative subset (3-5 tomograms) is normally plenty.
-  # If there is no knowledge about well-suited tilt-series, this directory
-  # can be auto-filled by estimation of tomogram quality with RESOLVE.
-  # Auto fill only applies when the directory is empty or non-existent.
-  train: "mdocsTrain"
-
-  # Tilt series to denoise in  predict_isonet.
-  predict: "mdocs"
+# VRAM per GPU, in GB - the single setting that adapts the GPU-hungry steps
+# to the machine. Two profiles:
+#
+#   >= 24   MissAlignment: its own documented reference settings, unchanged
+#           (batch size 32 for training and reconstruction, 3
+#           reconstruction processes per GPU).
+#           IsoNet: cube_size 128 (see isonet.cube_size).
+#
+#   < 24    MissAlignment: low-memory profile, down to 12 GB (anything lower
+#           is treated as 12 and warned about). Three things shrink
+#           together: data_loading.batch_size, tilt_series_alignment.
+#           batch_size and how many reconstruction PROCESSES share one GPU,
+#           plus fewer dataloaders per trainer. NOT reduced: patch_size (96).
+#           Expect the smaller training batch to make the contrastive
+#           training a little noisier, i.e. a somewhat weaker correction
+#           than a 24 GB card would give - not a different kind of result.
+#           IsoNet: cube_size 96.
+gpu_memory_gb: 12
 
 
 # -----------------------------------------------------------------------------
@@ -207,40 +293,6 @@ tiltseries_filter:
   min_tilts_fraction: 0.5
   min_span_fraction: 0.5
   max_gap_factor: 5
-
-
-# -----------------------------------------------------------------------------
-#  External programs
-# -----------------------------------------------------------------------------
-#  Either a bare name (looked up on PATH) or an absolute path to the binary.
-# -----------------------------------------------------------------------------
-executables:
-  aretomo:    "AreTomo3"
-  isonet:     "isonet.py"
-  resolve:    "/opt/Tomo-Denoising-Pipeline/bin/RESOLVE" # quality_check
-  warptools:  "WarpTools"
-  missalign:  "/opt/Tomo-Denoising-Pipeline/bin/miss-alignment"                # run_missalignment
-
-  # OPTIONAL 
-  header:     "header"
-
-  # Only used if one of the conda_env_* settings above is set. 
-  conda:      "/path/to/conda"
-
-# -----------------------------------------------------------------------------
-#  GPUs
-# -----------------------------------------------------------------------------
-#  One list, and the ONLY GPUs any program this pipeline runs can see or use:
-#  every external call (WarpTools, AreTomo3 - both this pipeline's own
-#  axis-search runs and native ts_aretomo3 -, RESOLVE, IsoNet,
-#  miss-alignment) is launched with CUDA_VISIBLE_DEVICES set from this list.
-#
-#  Programs that ALSO take GPU ids as arguments are given them automatically,
-#  translated into the 0..N-1 numbering they see inside such a process
-#  (IsoNet --gpuID, AreTomo3 -Gpu, miss-alignment --training-devices /
-#  --reconstruction-devices). Write real GPU ids here and everywhere else in
-#  this file; the translation is never something to do by hand.
-gpus: [0, 1]
 
 
 # -----------------------------------------------------------------------------
@@ -386,6 +438,98 @@ aretomo:
 
 
 # -----------------------------------------------------------------------------
+#  Aligner   (align_tiltseries)
+# -----------------------------------------------------------------------------
+#  Which program does the final per-tomogram alignment - exactly ONE:
+#
+#    "aretomo"   WarpTools ts_aretomo3 (default)
+#    "imod"      WarpTools ts_etomo_patches - IMOD patch tracking
+#                (EXPERIMENTAL; needs IMOD - executables.imod /
+#                conda_env_imod)
+#
+#  Either way the tilt axis is determined once for the whole dataset and
+#  then held fixed. IMOD only refines a starting axis (the mdoc's is not
+#  trusted), so with "imod" it starts from the AreTomo search above - or from
+#  imod.initial_tilt_axis, and then AreTomo is not needed at all - refines it
+#  in a few patch-tracking rounds (the 'imod' section), and aligns every
+#  tilt series with the result fixed. Both results are listed in
+#  tilt_axis_refinement.txt.
+#
+#  Changing it re-aligns on the next align_tiltseries (and everything
+#  downstream follows).
+# -----------------------------------------------------------------------------
+aligner: "aretomo"
+
+
+# -----------------------------------------------------------------------------
+#  IMOD   (aligner: "imod" only)
+# -----------------------------------------------------------------------------
+#  Uses warptools.align_angpix, min_fov and perdevice like ts_aretomo3 does.
+# -----------------------------------------------------------------------------
+imod:
+
+  # "" (default): the starting axis is the AreTomo search's result (the
+  # aretomo section). A degrees value is used instead, and AreTomo is not
+  # run at all (no ts_stack, no AreTomo search).
+  initial_tilt_axis: ""
+
+  # Search rounds before the final alignment. Each one runs
+  #   ts_etomo_patches --do_axis_search
+  # on a random subset: IMOD fits each series' axis, WarpTools takes their
+  # median - which the next round starts from. Stops early once a round
+  # moves the axis by less than 0.1 deg. 0: the starting axis is used as it
+  # is.
+  tilt_axis_iterations: 1
+
+  # Tilt series per round (all of them in smaller datasets), and the seed
+  # for picking them, so a resumed run picks the same ones.
+  tilt_axis_subset_size: 10
+  tilt_axis_seed: 0
+
+  # Patch size for the patch tracking, in Angstrom (ts_etomo_patches
+  # --patch_size) - a physical size: IMOD gets patch_size / align_angpix
+  # pixels, so it covers the same area whatever align_angpix is.
+  # "auto" (default): the short side of the field of view / 7, rounded to
+  # 100 A, at least 500 A (WarpTools' default) - e.g. 800 A for a 5565 A
+  # field of view. Fitted to the MissAlignment authors' values (500 A at
+  # 1.0 A/px, 1000 A at 1.7 A/px, 1500-2000 A above 2.5 A/px); too small
+  # patches at coarse pixel sizes made IMOD fail. Or a number of Angstrom.
+  patch_size: "auto"
+
+
+# -----------------------------------------------------------------------------
+#  Leveling   (align_tiltseries)   *** EXPERIMENTAL ***
+# -----------------------------------------------------------------------------
+#  true: WarpTools ts_autolevel runs after the final alignment (either
+#  aligner). It measures how the sample slab is tilted and stores that as
+#  LevelAngleX / LevelAngleY in each tilt series' XML; every later
+#  reconstruction (and ts_export_particles) is then rotated so the slab lies
+#  flat. Uses warptools.align_angpix and perdevice.
+#
+#  Why: a tilted slab needs a much thicker volume. The gain only shows once
+#  the volume is made thinner to match (tomo_dimensions z, or
+#  missalign.training_volume_dimensions z).
+#
+#  CAUTION - this can HURT IsoNet2's missing-wedge correction. IsoNet2 models
+#  the wedge as a tilt range around the volume's Y axis. LevelAngleY is just a
+#  tilt offset, and the pipeline adds it to the tilt range it hands IsoNet2.
+#  LevelAngleX tilts the wedge itself, which IsoNet2 cannot model: its wedge
+#  is then off by that angle. CryoCARE is not affected.
+#
+#  If ts_autolevel fails for any tilt series, the run stops. Changing this
+#  setting re-aligns on the next align_tiltseries; reconstructions and
+#  everything after them must then be redone (-f).
+# -----------------------------------------------------------------------------
+autolevel:
+
+  enabled: false
+
+  # Patch size for the leveling estimate, in Angstrom (ts_autolevel
+  # --patch_size; WarpTools' default). Independent of imod.patch_size.
+  patch_size: 500
+
+
+# -----------------------------------------------------------------------------
 #  WarpTools   (motion_correct / align_tiltseries / reconstruct_tomograms)
 # -----------------------------------------------------------------------------
 warptools:
@@ -408,8 +552,12 @@ warptools:
   tilt_offset: ""
 
   # Pixel size (A) for ts_stack, this pipeline's own axis-search AreTomo
-  # calls, and native ts_aretomo3.
-  align_angpix: 2*pixel_size # should be > pixel_size * 2^frameseries.bin
+  # calls, and native ts_aretomo3 - i.e. the binning the tilt series are
+  # ALIGNED at. Does not limit the reconstruction (recon_angpix).
+  # Best kept a multiple of the raw pixel size ("k*pixel_size"): a fixed
+  # value (e.g. 10 A) is a very different binning for a 0.65 A and a 2.7 A
+  # dataset. Must be >= pixel_size * 2^frameseries.bin.
+  align_angpix: 4*pixel_size
 
   # Final reconstruction pixel size (A), for ts_reconstruct. Also what the
   # half maps' voxel size is taken to be everywhere downstream (IsoNet, ...).
@@ -466,28 +614,9 @@ missalign:
     xy: ""     # e.g. "4000x5600"
     z: ""      # e.g. 600. Should probably be smaller than z of tomo_dimensions
 
-  # VRAM per GPU, in GB - the single setting that adapts MissAlignment to
-  # the machine. Two profiles:
-  #
-  #   >= 24   MissAlignment's own documented reference settings, unchanged:
-  #           batch size 32 for both the training and the reconstruction
-  #           pool, and 3 reconstruction processes per GPU.
-  #
-  #   < 24    Low-memory profile, down to 12 GB (anything lower is treated
-  #           as 12 and warned about). Three things shrink together, 
-  #           data_loading.batch_size, tilt_series_alignment.batch_size, 
-  #           how many reconstruction PROCESSES share one GPU.
-  #           Also fewer dataloaders per trainer, which each drive
-  #           reconstruction work. What is NOT reduced: patch_size (96). 
-  #
-  #           Expect the smaller training batch to make the contrastive
-  #           training a little noisier, i.e. a somewhat weaker correction
-  #           than a 24 GB card would give - not a different kind of result.
-  #
-  gpu_memory_gb: 12
-
-  # Overrides for everything the gpu_memory_gb profile decides. Leave null
-  # (the default) to use the profile. 
+  # The memory profile comes from the top-level gpu_memory_gb (see 'GPUs').
+  # Overrides for everything that profile decides. Leave null
+  # (the default) to use the profile.
   batch_size: null                        # data_loading.batch_size
   alignment_batch_size: null              # tilt_series_alignment.batch_size
   reconstruction_processes_per_gpu: null
@@ -495,8 +624,10 @@ missalign:
   reconstruction_devices: null
   dataloaders_per_trainer: null
 
-  # miss-alignment train's --prepare-stacks, in GB of scratch space.
-  prepare_stacks_gb: 10.0
+  # miss-alignment train's --prepare-stacks: the PIXEL SIZE in Angstrom
+  # MissAlignment rescales the tilt images to when it builds its own tilt
+  # stacks before training. 10.0 is MissAlignment's own documented value.
+  stack_pixel_size: 10.0
 
   # NCCL transport control for multi-GPU training (ignored with a single
   # training device - there is no DDP and no NCCL then).
@@ -522,6 +653,21 @@ missalign:
 
 
 # -----------------------------------------------------------------------------
+#  Denoiser
+# -----------------------------------------------------------------------------
+#  Which denoiser run_pipe trains and applies - exactly ONE, never both:
+#
+#    "isonet"    IsoNet2: denoising AND missing-wedge correction (default)
+#    "cryocare"  CryoCARE: denoising only
+#
+#  Both train on the same contrast-inverted frame-split half maps
+#  (mdocs.train) and denoise mdocs.predict. The standalone commands
+#  (train_isonet / train_cryocare, ...) run regardless of this setting.
+# -----------------------------------------------------------------------------
+denoiser: "isonet"
+
+
+# -----------------------------------------------------------------------------
 #  IsoNet
 # -----------------------------------------------------------------------------
 isonet:
@@ -532,13 +678,30 @@ isonet:
   # Epochs for the missing-wedge refinement (step 'refine').
   refine_epochs: 100
 
-  # CTF handling mode passed to denoise/refine. "None" (the exact string
-  # IsoNet2's CLI expects) is correct here and should normally stay that
-  # way: the half maps IsoNet trains on are already CTF-corrected by
-  # WarpTools  IsoNet2's other modes ("network"/"wiener"/
-  # "phase_only") each assume RAW, un-CTF-corrected weighted-back-projection
-  # input and apply their own CTF-shaped correction on top of it.
-  ctf_mode: "None"
+  # Subtomogram cube size for denoise/refine. "auto": 128 when
+  # gpu_memory_gb >= 24, otherwise 96 (IsoNet2's default). Or a number
+  # (multiple of 16). Larger cubes see more context but make every epoch
+  # slower (128 vs 96: about 2.4x the voxels). predict takes the cube size
+  # from the trained network.
+  cube_size: "auto"
+
+  # CTF handling passed to denoise/refine/predict:
+  #   "None"     no CTF model inside IsoNet2.
+  #   "network"  (default) IsoNet2 includes the CTF in its training (--CTF_mode
+  #              network), using each tomogram's defocus, read from
+  #              warp_tiltseries/<tomo>.xml (median <GridCTF> of the 3 tilts
+  #              acquired first), and acquisition.voltage /
+  #              spherical_aberration / amplitude_contrast.
+  #   ("wiener" / "phase_only" are passed on as well, untested here.)
+  # WarpTools' ts_reconstruct only phase-flips the CTF (corrects its SIGN);
+  # the CTF amplitude modulation is still in the half maps - which is what
+  # IsoNet2's CTF modes can model.
+  ctf_mode: "network"
+
+  # Whether the half maps are already phase-flipped (--isCTFflipped). True
+  # for WarpTools' ts_reconstruct output. Only used when ctf_mode is not
+  # "None".
+  is_ctf_flipped: true
 
   # make_mask
   density_percentage: 50
@@ -556,6 +719,12 @@ isonet:
   # run, its in-place refinement too). If set, this ONE range is used for
   # every tomogram instead and left unedited in tomograms.star - only do this
   # if you know it applies to all of them.
+  #
+  # SIGN CONVENTION: WarpTools' XML stores the tilt angles with the opposite
+  # sign to IsoNet2 (and to the mdoc). The per-tomogram ranges are converted
+  # automatically (IsoNet min = -XML max, IsoNet max = -XML min). A value
+  # given HERE is used as is, i.e. in IsoNet2's convention - the same signs
+  # as the mdoc's angles, after any auto_zero / tilt_offset shift.
   fix_tilt_range: []
 
   # Trained networks to use. "auto" picks the most recent network_*.pt from
@@ -566,6 +735,32 @@ isonet:
 
   # Appended verbatim to the denoise/refine/predict calls.
   extra_args: ""
+
+
+# -----------------------------------------------------------------------------
+#  CryoCARE   (denoiser: "cryocare" - train_cryocare / predict_cryocare)
+# -----------------------------------------------------------------------------
+#  Noise2noise denoising of the even/odd half maps - the SAME contrast-
+#  inverted frame-split half maps IsoNet uses. No missing-wedge correction.
+#  Everything is written to <processing_directory>/cryocare/:
+#    train_data/   extracted training patches
+#    model/        the trained model (model/cryocare_model.tar.gz)
+#    denoised/     the denoised tomograms - the deliverable
+#  The json configs passed to CryoCARE are kept there too.
+# -----------------------------------------------------------------------------
+cryocare:
+
+  # Training epochs (cryoCARE_train.py).
+  epochs: 100
+
+  # Training patch size in voxels and how many are extracted from the
+  # training tomograms (cryoCARE_extract_train_data.py).
+  patch_shape: [72, 72, 72]
+  num_slices: 1800
+
+  # Tiles per axis for prediction (cryoCARE_predict.py) - raise it if
+  # prediction runs out of GPU memory.
+  n_tiles: [8, 8, 8]
 
 
 # -----------------------------------------------------------------------------

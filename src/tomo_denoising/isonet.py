@@ -8,10 +8,18 @@
   4. ``isonet.py make_mask``     masks from the denoised volumes
   5. ``isonet.py refine``        missing-wedge network
 
-No defocus estimate is needed anywhere in this chain: ``isonet.ctf_mode`` is
-``"None"`` (see the config comment - the half maps are already CTF-corrected
-by WarpTools, before IsoNet ever sees them), and IsoNet2 does not use a
-defocus value at all in that mode. CTFFIND4 is not run by this pipeline.
+CTF: WarpTools' ts_reconstruct phase-flips the half maps (corrects the
+CTF's sign only). With ``isonet.ctf_mode: "None"`` IsoNet2 uses no CTF model
+at all. With ``"network"`` (default) it models the remaining CTF amplitude
+modulation; it then needs each tomogram's defocus, written into
+``tomograms.star`` from the WarpTools XML (:func:`tomogram_defocus`), plus
+voltage/Cs/amplitude contrast from ``acquisition``, and is told the maps are
+already phase-flipped (``isonet.is_ctf_flipped``).
+
+Tilt ranges: WarpTools' XML stores the tilt angles with the OPPOSITE sign to
+IsoNet2's convention (confirmed on data: the empty wedge sits where IsoNet2
+puts it for -46/52 when the XML says -52/46). Every per-tomogram range is
+therefore converted on the way into the star file - see :func:`tilt_range`.
 
 ``predict_isonet`` is the final step: apply the refined network to the
 prediction set. Its output - the only directory holding the finished,
@@ -28,7 +36,7 @@ from . import tiltfilter
 from .halfmap_sets import ensure_halfmaps_available, resolve_frame_halfmaps_dir
 from .mdoc import collect_tilt_series
 from .steplog import StepLog, step_completed
-from .warptools import tiltseries_tilt_range
+from .warptools import level_angles, tiltseries_tilt_range
 from .utils import (
     banner,
     ensure_dir,
@@ -157,8 +165,10 @@ def _inverted_half_maps(config, source_dir, series_list, log=None,
 
 
 def _linked_half_maps(config, series_list, subset, log=None, force=False,
-                      dry_run=False):
-    """Link the half maps of *series_list* into ``isonet/<subset>/{even,odd}``.
+                      dry_run=False, base_dir=None):
+    """Link the half maps of *series_list* into ``isonet/<subset>/{even,odd}``
+    (or ``<base_dir>/<subset>/{even,odd}`` - CryoCARE uses the very same
+    inverted half maps, linked into its own folder).
 
     Both halves are linked under the SAME base name (``<tomo>.mrc``) so that
     IsoNet pairs them unambiguously regardless of how it matches the two
@@ -184,8 +194,8 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
     """
     ensure_halfmaps_available(config, log=log, dry_run=dry_run)
 
-    even_dir = ensure_dir(config.isonet_dir, subset, "even")
-    odd_dir = ensure_dir(config.isonet_dir, subset, "odd")
+    even_dir = ensure_dir(base_dir or config.isonet_dir, subset, "even")
+    odd_dir = ensure_dir(base_dir or config.isonet_dir, subset, "odd")
 
     source_dir = resolve_frame_halfmaps_dir(config, log=log)
     usable = []
@@ -193,7 +203,7 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
         even = os.path.join(source_dir, "even_%s_rec_tomo.mrc" % series.name)
         odd = os.path.join(source_dir, "odd_%s_rec_tomo.mrc" % series.name)
         if not (os.path.exists(even) and os.path.exists(odd)):
-            warn("no half maps for %s - excluded from IsoNet." % series.name)
+            warn("no half maps for %s - excluded from denoising." % series.name)
             continue
         usable.append(series)
 
@@ -208,7 +218,7 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
                 link_file(os.path.join(inverted_dir, "%s_%s_rec_tomo.mrc"
                                        % (half, series.name)),
                           os.path.join(half_dir, series.name + ".mrc"),
-                          force=True)
+                          force=True, within=config.processing_dir)
 
     if not usable:
         raise SystemExit(
@@ -222,18 +232,122 @@ def _linked_half_maps(config, series_list, subset, log=None, force=False,
 # ---------------------------------------------------------------- tilt range
 
 
-def tilt_range(config, tomo_name):
-    """Minimum and maximum tilt angle actually used by *tomo_name*.
+def xml_to_isonet_range(xml_min, xml_max):
+    """A tilt range from WarpTools' XML, in IsoNet2's convention.
 
-    Thin wrapper around ``warptools.tiltseries_tilt_range`` - see that
-    function for exactly where this comes from and why (the FINAL
+    The XML's angles have the opposite sign to IsoNet2's (and the mdoc's),
+    so the range is negated AND swapped: XML -52/46 -> IsoNet -46/52.
+    Independent of the defocus handedness ts_defocus_hand finds - that
+    (``AreAnglesInverted``) only changes how WarpTools computes the defocus
+    across a tilt image, not the projection geometry.
+    """
+    return -xml_max, -xml_min
+
+
+def tilt_range(config, tomo_name):
+    """Minimum and maximum tilt angle actually used by *tomo_name*, in
+    IsoNet2's convention (see :func:`xml_to_isonet_range`).
+
+    Read through ``warptools.tiltseries_tilt_range`` - see that function for
+    exactly where this comes from and why (the FINAL
     ``warp_tiltseries/<tomo>.xml``, never an AreTomo-generated file).
     """
     result = tiltseries_tilt_range(config, tomo_name)
     if result is None:
         warn("no usable tilt range for %s (no warp_tiltseries/%s.xml, or it "
              "has no angles)" % (tomo_name, tomo_name))
-    return result
+        return None
+    level = level_angles(config, tomo_name) or (0.0, 0.0)
+    if level == (0.0, 0.0):
+        return xml_to_isonet_range(*result)
+    # Leveled (autolevel.enabled): WarpTools adds LevelAngleY to every tilt
+    # angle (it is not in <Angles>), so the range IsoNet gets must too.
+    # LevelAngleX tilts the missing wedge itself - IsoNet2 cannot model it.
+    level_x, level_y = level
+    shifted = (result[0] + level_y, result[1] + level_y)
+    isonet_range = xml_to_isonet_range(*shifted)
+    warn("%s is LEVELED (ts_autolevel): its IsoNet2 tilt range %.2f/%.2f "
+         "includes LevelAngleY %+.2f deg. LevelAngleX %+.2f deg tilts the "
+         "missing wedge in a way IsoNet2 cannot model - its missing-wedge "
+         "correction is off by that much."
+         % ((tomo_name,) + isonet_range + (level_y, level_x)))
+    return isonet_range
+
+
+# ------------------------------------------------------------------- defocus
+
+
+#: Of the (up to) three first-acquired tilts' defoci, one is dropped as an
+#: outlier when they span more than this many micrometres.
+DEFOCUS_OUTLIER_SPAN_UM = 0.5
+
+
+def combine_defoci(values_um):
+    """One defocus (micrometres) from the first-acquired tilts' values.
+
+    Values <= 0 are ignored (an unfitted or failed tilt). Of three, if they
+    span more than :data:`DEFOCUS_OUTLIER_SPAN_UM`, the one farthest from
+    their median is dropped and the other two averaged; otherwise their
+    median is used. Two are averaged, one is used as is. None if nothing
+    usable is left.
+    """
+    import statistics
+
+    values = [v for v in values_um if v > 0]
+    if not values:
+        return None
+    if len(values) >= 3:
+        values = values[:3]
+        if max(values) - min(values) > DEFOCUS_OUTLIER_SPAN_UM:
+            middle = statistics.median(values)
+            values.remove(max(values, key=lambda v: abs(v - middle)))
+            return sum(values) / len(values)
+        return statistics.median(values)
+    return sum(values) / len(values)
+
+
+def tomogram_defocus(config, tomo_name, count=3):
+    """The defocus of *tomo_name* in ANGSTROM for IsoNet2's rlnDefocus, or
+    None.
+
+    From the per-tilt ``<GridCTF>`` that ts_ctf writes into
+    ``warp_tiltseries/<tomo>.xml`` (NOT the XML's ``<CTF>`` block): the
+    *count* used tilts acquired FIRST - lowest ``<Dose>``, i.e. the 0-degree
+    view of the acquisition (also with auto_zero / tilt_offset, which only
+    shift the angles) and its neighbours in the dose-symmetric scheme -
+    combined by :func:`combine_defoci`. GridCTF is in micrometres.
+    """
+    import xml.etree.ElementTree as ET
+
+    xml_path = os.path.join(config.warp_tiltseries_dir, tomo_name + ".xml")
+    try:
+        root = ET.parse(xml_path).getroot()
+        dose = [float(x) for x in root.find("Dose").text.split()]
+        grid = root.find("GridCTF")
+        per_tilt = {}
+        for node in grid.findall("Node"):
+            per_tilt.setdefault(int(node.get("Z")), []).append(float(node.get("Value")))
+    except (OSError, ET.ParseError, AttributeError, TypeError, ValueError):
+        return None
+    if len(per_tilt) != len(dose):
+        return None     # no per-tilt GridCTF yet (ts_ctf not run)
+
+    use = root.find("UseTilt")
+    flags = ([x.strip().lower() == "true" for x in use.text.split()]
+             if use is not None and (use.text or "").strip() else [])
+    if len(flags) != len(dose):
+        flags = [True] * len(dose)
+
+    first = sorted((i for i in range(len(dose)) if flags[i]),
+                   key=lambda i: dose[i])[:count]
+    # Mean over the image plane, should GridCTF ever be a spatial grid.
+    values = [sum(per_tilt[i]) / len(per_tilt[i]) for i in first if i in per_tilt]
+    defocus = combine_defoci(values)
+    return None if defocus is None else defocus * 10000.0
+
+
+def _ctf_mode_on(config):
+    return str(config["isonet"]["ctf_mode"]).strip().lower() != "none"
 
 
 def tilt_ranges(config, series_list):
@@ -246,7 +360,9 @@ TILT_TOLERANCE = 2.0
 
 
 def resolve_tilt_range(config, usable, ranges):
-    """Pick the single tilt range ``prepare_star`` will be given.
+    """Pick the single tilt range ``prepare_star`` will be given - in
+    IsoNet2's convention, like every range here (*ranges* comes from
+    :func:`tilt_range`, ``isonet.fix_tilt_range`` is written in it).
 
     ``prepare_star`` accepts one ``--tilt_min``/``--tilt_max`` for the whole
     set, so tomograms whose ranges differ have to be reconciled. The WIDEST
@@ -263,7 +379,7 @@ def resolve_tilt_range(config, usable, ranges):
 
     This is only what ``prepare_star`` is called with - it is corrected
     afterwards, back to a per-tomogram range read from each tomogram's own
-    ``warp_tiltseries/<tomo>.xml`` (see ``_edit_star_tilt_range``), UNLESS
+    ``warp_tiltseries/<tomo>.xml`` (see ``_edit_star_rows``), UNLESS
     ``isonet.fix_tilt_range`` overrides the whole calculation, in which case
     the fixed range returned here is what ends up in the star file too.
 
@@ -305,17 +421,22 @@ def resolve_tilt_range(config, usable, ranges):
 _STAR_COLUMN_RE = re.compile(r"^_(\S+)\s+#(\d+)")
 
 
-def _edit_star_tilt_range(star_path, usable, ranges):
-    """Replace the dataset-wide TiltMin/TiltMax in *star_path* with each
-    tomogram's own range, read from its ``warp_tiltseries/<tomo>.xml`` (see
-    ``tilt_range``). *ranges* is ``tilt_ranges()``'s return value.
+def _edit_star_rows(star_path, usable, ranges=None, defoci=None):
+    """Write each tomogram's own values into the rows of *star_path*:
 
-    ``prepare_star`` writes the same ``--tilt_min``/``--tilt_max`` on every
-    row (``resolve_tilt_range`` had to pick one value for the whole call), so
-    this is what makes the star file per-tomogram again. Rows are matched to
-    tomograms positionally, in the same order ``usable`` was handed to
-    ``prepare_star`` (sorted by name) - the star file has no other way to
-    identify which row is which tomogram, since ``rlnTomoName`` is "None".
+    - *ranges* (``tilt_ranges()``'s return value, IsoNet2 convention): its
+      own rlnTiltMin/rlnTiltMax instead of the dataset-wide range
+      ``prepare_star`` wrote on every row (``resolve_tilt_range`` had to
+      pick one value for the whole call). None leaves them as written
+      (``isonet.fix_tilt_range``).
+    - *defoci* (``{name: Angstrom or None}``, :func:`tomogram_defocus`): its
+      own rlnDefocus. None leaves the column as written.
+
+    Rows are matched to tomograms positionally, in the same order ``usable``
+    was handed to ``prepare_star`` (sorted by name - which is also the
+    order IsoNet2 lists the linked half maps in) - the star file has no
+    other way to identify which row is which tomogram, since
+    ``rlnTomoName`` is "None".
     """
     with open(star_path, encoding="utf-8", errors="replace") as handle:
         lines = handle.readlines()
@@ -328,34 +449,45 @@ def _edit_star_tilt_range(star_path, usable, ranges):
             columns[match.group(1)] = int(match.group(2)) - 1
             header_end = index
 
-    if header_end is None or "rlnTiltMin" not in columns or "rlnTiltMax" not in columns:
+    if ranges is not None and not ("rlnTiltMin" in columns and "rlnTiltMax" in columns):
         warn("%s has no rlnTiltMin/rlnTiltMax column - per-tomogram tilt "
              "ranges were not applied." % star_path)
+        ranges = None
+    if defoci is not None and "rlnDefocus" not in columns:
+        warn("%s has no rlnDefocus column - per-tomogram defocus was not "
+             "applied." % star_path)
+        defoci = None
+    if header_end is None or (ranges is None and defoci is None):
         return
-    min_col, max_col = columns["rlnTiltMin"], columns["rlnTiltMax"]
 
     data_rows = [index for index in range(header_end + 1, len(lines))
                  if lines[index].strip()]
     if len(data_rows) != len(usable):
         warn("%s has %d rows but %d tomograms were prepared - per-tomogram "
-             "tilt ranges were not applied." % (star_path, len(data_rows), len(usable)))
+             "tilt ranges / defocus were not applied."
+             % (star_path, len(data_rows), len(usable)))
         return
 
     for row_index, series in zip(data_rows, usable):
-        own_range = ranges.get(series.name)
-        if own_range is None:
-            warn("no warp_tiltseries/%s.xml tilt range - that row keeps the "
-                 "dataset-wide range prepare_star wrote." % series.name)
-            continue
         fields = lines[row_index].split()
-        fields[min_col] = "%.6f" % own_range[0]
-        fields[max_col] = "%.6f" % own_range[1]
+        if ranges is not None:
+            own_range = ranges.get(series.name)
+            if own_range is None:
+                warn("no warp_tiltseries/%s.xml tilt range - that row keeps "
+                     "the dataset-wide range prepare_star wrote." % series.name)
+            else:
+                fields[columns["rlnTiltMin"]] = "%.6f" % own_range[0]
+                fields[columns["rlnTiltMax"]] = "%.6f" % own_range[1]
+        if defoci is not None and defoci.get(series.name) is not None:
+            fields[columns["rlnDefocus"]] = "%.1f" % defoci[series.name]
         lines[row_index] = "\t".join(fields) + "\n"
 
     with open(star_path, "w", encoding="utf-8") as handle:
         handle.writelines(lines)
-    info("tomograms.star: per-tomogram tilt ranges applied from each "
-         "warp_tiltseries/<tomo>.xml")
+    applied = [part for part, on in (("tilt ranges", ranges is not None),
+                                     ("defocus", defoci is not None)) if on]
+    info("tomograms.star: per-tomogram %s applied from each "
+         "warp_tiltseries/<tomo>.xml" % " and ".join(applied))
 
 
 def _half_map_pixel_size(config, series):
@@ -380,18 +512,19 @@ def prepare_star(config, series_list, subset, log=None, force=False,
                  dry_run=False):
     """Run ``isonet.py prepare_star``.
 
-    No defocus is passed: ``isonet.ctf_mode`` is ``"None"`` (the half maps
-    are already CTF-corrected by WarpTools before IsoNet ever sees them), and
-    IsoNet2 does not use a defocus value in that mode. ``--tilt_min``/
-    ``--tilt_max`` take a single value each, so the overall range across the
-    selected tomograms is used for that call; the per-tomogram ranges are
-    logged.
+    Voltage, Cs and amplitude contrast come from ``acquisition``.
+    ``--tilt_min``/``--tilt_max`` take a single value each, so the overall
+    range across the selected tomograms is used for that call; the
+    per-tomogram ranges are logged.
 
-    Once IsoNet has written ``tomograms.star``, ``rlnTiltMin``/``rlnTiltMax``
-    on each row are corrected back to that tomogram's own range, read from its
-    ``warp_tiltseries/<tomo>.xml`` (see ``_edit_star_tilt_range``) - unless
-    ``isonet.fix_tilt_range`` is set, in which case the fixed range is left as
-    IsoNet wrote it on every row.
+    Once IsoNet has written ``tomograms.star``, each row gets its tomogram's
+    own values (see ``_edit_star_rows``): ``rlnTiltMin``/``rlnTiltMax`` from
+    its ``warp_tiltseries/<tomo>.xml``, converted to IsoNet2's sign
+    convention - unless ``isonet.fix_tilt_range`` is set, in which case the
+    fixed range is left as IsoNet wrote it on every row - and ``rlnDefocus``
+    (:func:`tomogram_defocus`). The defocus is written whatever
+    ``isonet.ctf_mode`` is (IsoNet2 ignores it in "None" mode), but only a
+    CTF mode REQUIRES it: then a tomogram without one stops the step.
     """
     even_dir, odd_dir, usable = _linked_half_maps(config, series_list, subset,
                                                   log=log, force=force,
@@ -400,23 +533,44 @@ def prepare_star(config, series_list, subset, log=None, force=False,
     pixel_size = _half_map_pixel_size(config, usable[0])
     ranges = tilt_ranges(config, usable)
 
+    defoci = {} if dry_run else {s.name: tomogram_defocus(config, s.name)
+                                 for s in usable}
+
     info("half-map pixel size %.4f A" % pixel_size)
-    info("tomograms, in the order prepare_star receives them:")
+    info("tomograms, in the order prepare_star receives them "
+         "(tilt range in IsoNet2's convention):")
     for series in usable:
         own_range = ranges.get(series.name)
         tilts = ("%6.1f to %6.1f" % own_range if own_range is not None
                  else "     no warp_tiltseries/%s.xml" % series.name)
-        info("    %-24s tilt %s" % (series.name, tilts))
+        defocus = defoci.get(series.name)
+        info("    %-24s tilt %s   defocus %s"
+             % (series.name, tilts,
+                "%.0f A" % defocus if defocus is not None else "unknown"))
+
+    missing = [s.name for s in usable if defoci.get(s.name) is None]
+    if missing and not dry_run and _ctf_mode_on(config):
+        raise SystemExit(
+            "ERROR: isonet.ctf_mode is %r, which needs each tomogram's defocus, "
+            "but none could be read for: %s\n"
+            "It comes from <GridCTF> in warp_tiltseries/<tomo>.xml, written by "
+            "ts_ctf (reconstruct_tomograms). Check that ts_ctf ran for these "
+            "tilt series, or set isonet.ctf_mode to \"None\"."
+            % (config["isonet"]["ctf_mode"], ", ".join(missing)))
 
     tilt_min, tilt_max, fixed_tilt_range = resolve_tilt_range(config, usable, ranges)
 
+    acquisition = config["acquisition"]
     work_dir = ensure_dir(config.isonet_config_dir, "prepare_" + subset)
     run(config.command("isonet", "prepare_star",
                        "--even", even_dir,
                        "--odd", odd_dir,
                        "--pixel_size", "%.4f" % pixel_size,
                        "--tilt_min", "%.2f" % tilt_min,
-                       "--tilt_max", "%.2f" % tilt_max),
+                       "--tilt_max", "%.2f" % tilt_max,
+                       "--voltage", "%g" % float(acquisition["voltage"]),
+                       "--cs", "%g" % float(acquisition["spherical_aberration"]),
+                       "--ac", "%g" % float(acquisition["amplitude_contrast"])),
         cwd=work_dir, env=_gpu_env(config),
         log_file=os.path.join(config.isonet_config_dir,
                               "prepare_star_%s.log" % subset),
@@ -440,8 +594,9 @@ def prepare_star(config, series_list, subset, log=None, force=False,
     if fixed_tilt_range:
         info("isonet.fix_tilt_range is set - tomograms.star keeps that fixed "
              "range on every row.")
-    else:
-        _edit_star_tilt_range(produced[0], usable, ranges)
+    _edit_star_rows(produced[0], usable,
+                    ranges=None if fixed_tilt_range else ranges,
+                    defoci=defoci)
 
     return produced[0], usable
 
@@ -520,6 +675,47 @@ def _gpu_env(config):
     return gpu_env(config.gpus)
 
 
+#: isonet.cube_size "auto": 128 from this much VRAM per GPU (gpu_memory_gb).
+LARGE_CUBE_GPU_MEMORY_GB = 24.0
+
+
+def resolve_cube_size(config):
+    """``isonet.cube_size``: a number as given, or "auto" - 128 when
+    ``gpu_memory_gb`` >= 24, otherwise 96 (IsoNet2's own default)."""
+    raw = str(config["isonet"].get("cube_size") or "auto").strip().lower()
+    if raw == "auto":
+        return 128 if config.gpu_memory_gb >= LARGE_CUBE_GPU_MEMORY_GB else 96
+    try:
+        size = int(float(raw))
+    except ValueError:
+        raise SystemExit("ERROR: isonet.cube_size must be \"auto\" or a number, "
+                         "got %r" % config["isonet"]["cube_size"])
+    if size <= 0 or size % 16:
+        raise SystemExit("ERROR: isonet.cube_size must be a positive multiple "
+                         "of 16, got %d" % size)
+    return size
+
+
+def _ctf_flipped_args(config):
+    """``--isCTFflipped`` - only with a CTF mode on; IsoNet2 ignores it in
+    "None" mode, and leaving it out keeps those calls exactly as before."""
+    if not _ctf_mode_on(config):
+        return []
+    return ["--isCTFflipped", str(bool(config["isonet"]["is_ctf_flipped"]))]
+
+
+def _cube_args(config, log=None):
+    """``--cube_size`` for denoise/refine - left out when isonet.extra_args
+    already passes one (that wins, as it always did)."""
+    if "--cube_size" in _extra_args(config):
+        return []
+    size = resolve_cube_size(config)
+    if log is not None:
+        log.note("IsoNet cube size %d (isonet.cube_size %r, gpu_memory_gb %g)"
+                 % (size, config["isonet"].get("cube_size"), config.gpu_memory_gb))
+    return ["--cube_size", str(size)]
+
+
 def _extra_args(config):
     extra = str(config["isonet"]["extra_args"]).strip()
     return extra.split() if extra else []
@@ -573,9 +769,12 @@ def _train(config, log, force=False, dry_run=False):
     star, _ = prepare_star(config, series_list, "train", log=log, force=force,
                            dry_run=dry_run)
 
+    cube_args = _cube_args(config, log)
+
     banner("IsoNet 2/5  denoise (%d epochs)" % int(settings["denoise_epochs"]))
     run(config.command("isonet", "denoise", star,
                        "--CTF_mode", str(settings["ctf_mode"]),
+                       _ctf_flipped_args(config), cube_args,
                        "--epochs", str(int(settings["denoise_epochs"])),
                        "--output_dir", DENOISE_DIR,
                        _gpu_args(config), _extra_args(config)),
@@ -590,6 +789,7 @@ def _train(config, log, force=False, dry_run=False):
     run(config.command("isonet", "predict", star, denoise_network,
                        "--output_dir", DENOISE_PREDICT_DIR,
                        "--output_prefix", DENOISE_PREDICT_PREFIX,
+                       _ctf_flipped_args(config),
                        _gpu_args(config), _extra_args(config)),
         cwd=work, env=_gpu_env(config),
         log_file=os.path.join(logs, "predict_denoise.log"),
@@ -607,6 +807,7 @@ def _train(config, log, force=False, dry_run=False):
     banner("IsoNet 5/5  refine (%d epochs)" % int(settings["refine_epochs"]))
     run(config.command("isonet", "refine", star,
                        "--CTF_mode", str(settings["ctf_mode"]),
+                       _ctf_flipped_args(config), cube_args,
                        "--mw_weight", str(settings["mw_weight"]),
                        "--bfactor", str(settings["bfactor"]),
                        "--epochs", str(int(settings["refine_epochs"])),
@@ -692,6 +893,7 @@ def _predict(config, log, force=False, dry_run=False):
         run(config.command("isonet", "predict", star, network,
                            "--output_dir", FINAL_PREDICT_DIR,
                            "--output_prefix", FINAL_PREDICT_PREFIX,
+                           _ctf_flipped_args(config),
                            _gpu_args(config), _extra_args(config)),
             cwd=work, env=_gpu_env(config),
             log_file=os.path.join(logs, "predict_refine.log"),

@@ -83,7 +83,7 @@ import sys
 import yaml
 
 from . import tiltfilter
-from .mdoc import collect_tilt_series
+from .mdoc import collect_tilt_series, mdoc_move_commands
 from .steplog import StepLog
 from .utils import (
     banner, ensure_dir, gpu_env, gpu_id_note, gpu_ids_for, info,
@@ -228,9 +228,10 @@ def resolve_nccl_env(config, log=None):
 #   steps_per_epoch / max_epochs_per_iteration / the iteration schedule
 #       Runtime, not memory.
 #
-#   prepare_stacks_gb
-#       Host-side scratch for the pre-extracted stacks, nothing to do with
-#       VRAM - left as its own config setting.
+#   stack_pixel_size (--prepare-stacks)
+#       The PIXEL SIZE (Angstrom) of the tilt stacks MissAlignment builds for
+#       itself before training - nothing to do with VRAM. (Until 1.2.0 this
+#       was misnamed prepare_stacks_gb, as if it were scratch space in GB.)
 
 #: VRAM per GPU (GB) MissAlignment's own reference settings are written for.
 REFERENCE_GPU_MEMORY_GB = 24.0
@@ -261,7 +262,7 @@ def _memory_profile(config, log=None):
     Any of these can be pinned explicitly in the config, which always wins.
     """
     settings = config["missalign"]
-    requested = float(settings["gpu_memory_gb"])
+    requested = config.gpu_memory_gb
     effective = max(requested, MIN_GPU_MEMORY_GB)
 
     if effective >= REFERENCE_GPU_MEMORY_GB:
@@ -271,7 +272,7 @@ def _memory_profile(config, log=None):
                            % REFERENCE_GPU_MEMORY_GB)
     else:
         if requested < MIN_GPU_MEMORY_GB:
-            warn("missalign.gpu_memory_gb is %g, below the %g GB this "
+            warn("gpu_memory_gb is %g, below the %g GB this "
                  "pipeline's low-memory profile is designed for - treating it "
                  "as %g GB. MissAlignment may still run out of memory."
                  % (requested, MIN_GPU_MEMORY_GB, MIN_GPU_MEMORY_GB))
@@ -366,10 +367,19 @@ def check_excluded_xmls(config, log):
         "",
     ]
     lines += ["    rm %s" % shlex.quote(p) for p in paths]
+    moves = mdoc_move_commands(config, leftover)
+    if moves:
+        lines += [
+            "",
+            "and move their mdocs out of the mdoc folders, so no later step "
+            "(e.g. the denoiser's prediction) picks them up again:",
+            "",
+        ] + moves
     lines += [
         "",
-        "With their XML removed, a later 'align_tiltseries --force' imports "
-        "them afresh and AreTomo3 tries them again.",
+        "To give them another try instead, keep the mdocs: with their XML "
+        "removed, a later 'align_tiltseries --force' imports them afresh and "
+        "AreTomo3 tries them again.",
     ]
     message = "\n".join(lines)
     print("\nERROR: " + message + "\n", file=sys.stderr)
@@ -414,11 +424,13 @@ def check_tilt_counts(config, series_names, log):
         "On these, miss-alignment's reconstruction workers crash and training "
         "then waits for them forever, so nothing was started.",
         "",
-        "To leave them out: take their mdocs out of mdocs.preprocessing (%s) "
-        "and re-run 'tomo_denoising run_pipe' WITHOUT --force. Every step "
+        "To leave them out: move their mdocs out of the mdoc folders and "
+        "re-run 'tomo_denoising run_pipe' WITHOUT --force. Every step "
         "resumes; align_tiltseries lists the files an earlier run made for "
-        "them, for you to remove." % config.mdoc_dir("preprocessing"),
+        "them, for you to remove.",
+        "",
     ]
+    lines += mdoc_move_commands(config, [name for name, _ in too_few])
     if iter_dirs:
         lines += [
             "",
@@ -912,7 +924,9 @@ def run_missalign_train(config, missalign_config_path, profile, log,
         "--reconstruction-devices", ",".join(str(g) for g in reconstruction_devices),
         "--dataloaders-per-trainer", str(dataloaders),
         "--start-at-iteration", str(start_at),
-        "--prepare-stacks", str(float(settings["prepare_stacks_gb"])))
+        # A pixel size in Angstrom (miss-alignment train --help: "Pixel size
+        # (in Angstroms) for preprocessing tilt stacks"), not disk space.
+        "--prepare-stacks", str(float(settings["stack_pixel_size"])))
     conda_env = config.conda_env("missalign")
     if conda_env:
         info("running miss-alignment inside conda environment %r" % conda_env)
